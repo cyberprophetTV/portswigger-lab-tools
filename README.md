@@ -52,6 +52,12 @@ Options:
 
 With Burp open and proxying, every request + response shows up in Burp's HTTP History tab. From there you can replay them in Repeater, send interesting ones to Comparer/Scanner, or intercept and modify mid-flight. Useful for understanding exactly what the script is sending and for follow-up testing.
 
+**Reliability + observability**
+- `-H NAME:VALUE` (a.k.a. `--header`) — extra HTTP header sent on every request. Repeat for multiple. Example: `-H "Authorization: Bearer eyJ..." -H "X-Forwarded-For: 127.0.0.1"`.
+- `--retries N` — retry on connection errors / transient `502`/`503`/`504` responses (default `2`).
+- `--verbose` — print every probe (not just the final result) and dump the first probe's response body so you can sanity-check the lab is talking back as expected.
+- `--output FILE.json` — write a JSON summary of the run (lab URL, valid username, password, credentials) for scripting.
+
 Example with stealth + session management on:
 
 ```bash
@@ -68,6 +74,84 @@ python3 username_enum_solver.py \
     https://YOUR-LAB-ID.web-security-academy.net \
     usernames.txt passwords.txt \
     --proxy burp
+```
+
+### `intruder.py`
+
+General-purpose HTTP request fuzzer modeled on Burp Suite's Intruder. Unlike `username_enum_solver.py` (which has hardcoded knowledge of the username-enumeration lab), `intruder.py` knows nothing about any specific endpoint — you give it a raw HTTP request template with `§MARKER§` payload positions, a wordlist, and an attack mode, and it does the rest.
+
+Use it for: SQL injection probing, XSS payload testing, path-traversal, directory enumeration, header-injection fuzzing, header/cookie value brute-force, JWT manipulation, or anything else that boils down to "swap value X into position Y and look at the response."
+
+**Attack modes** (same semantics as Burp Intruder):
+
+| Mode | Payload sets | Requests | Use case |
+|---|---|---|---|
+| `sniper` | 1 | N×M | Test each marker independently. Default. |
+| `battering-ram` | 1 | M | Same payload in every marker at once. |
+| `pitchfork` | K | min(list lengths) | Parallel iteration — credential pairs that shouldn't cross. |
+| `cluster-bomb` | K | product of lengths | Cartesian product — full brute-force. |
+
+**Matchers** (AND'd together; result must satisfy all enabled):
+- `--match-status SPEC` — e.g. `200`, `200-299`, `!403`, `5000-`
+- `--match-length SPEC` — same syntax
+- `--match-time SPEC` — response time in seconds
+- `--match-regex PATTERN` — pass if regex found in body
+- `--match-not-regex PATTERN` — pass if regex NOT found
+
+**Other flags** are the same as `username_enum_solver.py`: `--workers`, `--jitter`, `--fresh-session`, `--proxy`, `--insecure`, `--retries`, `--verbose`, `--output`.
+
+**Usage example — username enumeration as a generic fuzz**
+
+Create `req.txt`:
+
+```
+POST /login HTTP/1.1
+Host: YOUR-LAB-ID.web-security-academy.net
+Content-Type: application/x-www-form-urlencoded
+
+username=§USER§&password=junk
+```
+
+Then run:
+
+```bash
+python3 intruder.py req.txt \
+    --payload usernames.txt \
+    --mode sniper \
+    --match-length '!3168'   # show the outlier (whatever length isn't 3168)
+```
+
+**Usage example — full credential brute-force (cluster-bomb)**
+
+```
+POST /login HTTP/1.1
+Host: YOUR-LAB-ID.web-security-academy.net
+Content-Type: application/x-www-form-urlencoded
+
+username=§USER§&password=§PW§
+```
+
+```bash
+python3 intruder.py req.txt \
+    --payload usernames.txt \
+    --payload passwords.txt \
+    --mode cluster-bomb \
+    --match-status 302       # success is a redirect to /my-account
+```
+
+**Usage example — header injection probe**
+
+```
+GET /admin HTTP/1.1
+Host: YOUR-LAB-ID.web-security-academy.net
+X-Forwarded-For: §IP§
+```
+
+```bash
+python3 intruder.py req.txt \
+    --payload ips.txt \
+    --match-not-regex 'Forbidden' \
+    --output hits.json
 ```
 
 ## Wordlists

