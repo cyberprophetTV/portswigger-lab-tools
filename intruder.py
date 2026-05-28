@@ -183,6 +183,14 @@ import urllib3                               # for InsecureRequestWarning suppre
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry         # connection-error retry policy
 
+# Local: color + progress helpers (see _common.py). Importing from a
+# private-named module avoids polluting the public surface if someone
+# imports * from this file.
+from _common import (
+    tag_hit, tag_miss, tag_info, tag_ok, tag_warn, tag_err,
+    progress, bold, dim,
+)
+
 
 # ---------------------------------------------------------------------
 # MARKER REGEX
@@ -698,16 +706,16 @@ def fuzz(cfg: FuzzConfig) -> None:
         iter_fn = pitchfork if cfg.mode == "pitchfork" else cluster_bomb
         iterations = list(iter_fn(template, payload_sets))
 
-    print(f"[*] target  : {scheme}://{host}")
-    print(f"[*] markers : {n_markers} in template")
-    print(f"[*] payloads: {[len(ps) for ps in payload_sets]}")
-    print(f"[*] mode    : {cfg.mode}")
-    print(f"[*] queued  : {len(iterations)} requests")
-    print(f"[*] workers : {cfg.workers}"
+    print(f"{tag_info()} target  : {bold(scheme + '://' + host)}")
+    print(f"{tag_info()} markers : {n_markers} in template")
+    print(f"{tag_info()} payloads: {[len(ps) for ps in payload_sets]}")
+    print(f"{tag_info()} mode    : {cfg.mode}")
+    print(f"{tag_info()} queued  : {len(iterations)} requests")
+    print(f"{tag_info()} workers : {cfg.workers}"
           + (f"  jitter {cfg.jitter[0]}-{cfg.jitter[1]}s" if cfg.jitter[1] > 0 else "")
           + ("  fresh-session" if cfg.fresh_session else ""))
     if cfg.proxy:
-        print(f"[*] proxy   : {cfg.proxy} (TLS verification disabled)")
+        print(f"{tag_info()} proxy   : {cfg.proxy} (TLS verification disabled)")
 
     # ---- Build shared session unless --fresh-session ----
     shared = None if cfg.fresh_session else build_session(
@@ -730,19 +738,23 @@ def fuzz(cfg: FuzzConfig) -> None:
 
     with ThreadPoolExecutor(max_workers=cfg.workers) as ex:
         futures = [ex.submit(worker, it) for it in iterations]
-        for fut in as_completed(futures):
+        # Wrap the as_completed iterator in a progress bar so long runs
+        # (cluster-bomb against big wordlists can easily be 10,000+
+        # requests) show progress instead of looking hung. The bar is
+        # a no-op when tqdm isn't installed.
+        for fut in progress(as_completed(futures), total=len(futures), desc=cfg.mode):
             label, req, status, length, body, elapsed, err = fut.result()
 
             if err:
                 hit = False
-                print(f"[err] {label}: {err}")
+                print(f"{tag_err()} {label}: {err}")
             else:
                 hit = cfg.matcher.matches(status, length, body, elapsed)
                 # Print either:
                 #   - every result if --verbose OR no matchers configured
                 #   - only hits if matchers configured and not verbose
                 if hit or cfg.verbose or not cfg.matcher.any_enabled():
-                    flag = "[HIT]" if hit else "[   ]"
+                    flag = tag_hit() if hit else tag_miss()
                     print(f"{flag} {label}  status={status} len={length} time={elapsed:.2f}s")
 
                 # Dump full first hit when --verbose: invaluable for
@@ -768,7 +780,7 @@ def fuzz(cfg: FuzzConfig) -> None:
     if cfg.output is not None:
         cfg.output.write_text(json.dumps(results, indent=2))
         n_hits = sum(1 for r in results if r["hit"])
-        print(f"[*] wrote {len(results)} results ({n_hits} hits) to {cfg.output}")
+        print(f"{tag_info()} wrote {len(results)} results ({n_hits} hits) to {cfg.output}")
 
 
 # =====================================================================

