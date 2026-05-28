@@ -2,6 +2,17 @@
 
 Small Python tools for solving PortSwigger [Web Security Academy](https://portswigger.net/web-security) labs without Burp Suite Pro. Burp Community's Intruder is artificially rate-limited, which makes brute-force / enumeration labs slow; these scripts hit the lab directly using `requests` + a small thread pool.
 
+**See [docs/walkthrough.md](docs/walkthrough.md) for an end-to-end annotated example** of solving the canonical username-enumeration lab with these tools.
+
+## Tools at a glance
+
+| Script | Purpose | Lab(s) |
+|---|---|---|
+| [`username_enum_solver.py`](username_enum_solver.py) | Two-phase username + password attack against an obvious-response leak | [Username enum via different responses](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-different-responses) |
+| [`subtle_response_solver.py`](subtle_response_solver.py) | Same idea but for the ~1-char-difference variant; uses `difflib.SequenceMatcher` + body canonicalization | [Username enum via subtly different responses](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-subtly-different-responses) |
+| [`timing_attack_solver.py`](timing_attack_solver.py) | Detects valid usernames by mean response time; long junk password + per-request X-Forwarded-For rotation | [Username enum via response timing](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-response-timing) |
+| [`intruder.py`](intruder.py) | General-purpose Burp-Intruder-style fuzzer (Sniper / Battering Ram / Pitchfork / Cluster Bomb), matchers, JSON output | Anything you can express as a request template + payload list |
+
 ## Disclaimer — Educational use only
 
 **This tool is for educational and authorized testing purposes only.** It is intended for:
@@ -169,4 +180,15 @@ python3 -c "import re,urllib.request as u; \
 ## Requirements
 
 - Python 3.10+
-- `requests`
+- `requests` (required)
+- `tqdm` (optional — enables the progress bar; scripts work without it)
+- `pytest` (only needed to run the test suite)
+
+## Development
+
+```bash
+pip install requests pytest
+pytest tests/ -v
+```
+
+71 unit tests cover the pure-logic helpers (request parsing, attack-mode generators, range-spec parsing, matchers, color helpers, canonicalization, IP generator). Network-touching code is left to manual lab testing. CI runs the suite on Python 3.10/3.11/3.12 — see [`.github/workflows/test.yml`](.github/workflows/test.yml).
