@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 cyberprophetTV. Licensed under the MIT License (see LICENSE).
+#
+# FOR EDUCATIONAL USE ONLY.
+# Intended for solving PortSwigger Web Security Academy labs and for
+# use against systems you OWN or have EXPLICIT WRITTEN PERMISSION to
+# test. Running this against unauthorized systems is illegal in most
+# jurisdictions (CFAA in the US, Computer Misuse Act in the UK, etc).
+# You are responsible for ensuring your use is lawful. See README.
 """
 =====================================================================
 Solver for PortSwigger lab:

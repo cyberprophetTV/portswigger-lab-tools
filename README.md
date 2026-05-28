@@ -2,7 +2,18 @@
 
 Small Python tools for solving PortSwigger [Web Security Academy](https://portswigger.net/web-security) labs without Burp Suite Pro. Burp Community's Intruder is artificially rate-limited, which makes brute-force / enumeration labs slow; these scripts hit the lab directly using `requests` + a small thread pool.
 
-> For use against PortSwigger's deliberately vulnerable training labs only.
+## Disclaimer — Educational use only
+
+**This tool is for educational and authorized testing purposes only.** It is intended for:
+
+- Solving [PortSwigger Web Security Academy](https://portswigger.net/web-security) labs (deliberately vulnerable training apps)
+- CTF challenges
+- Systems you own
+- Systems you have **explicit written authorization** to test (e.g. a signed pentest engagement)
+
+Running this — or any similar tool — against systems you do not own or have permission to test is **illegal** in most jurisdictions (e.g. the Computer Fraud and Abuse Act in the US, the Computer Misuse Act in the UK, and equivalents elsewhere). The author accepts no responsibility for misuse. **You are responsible for ensuring your use is lawful.**
+
+Licensed under the [MIT License](LICENSE).
 
 ## Tools
 
