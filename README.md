@@ -23,8 +23,26 @@ python3 username_enum_solver.py https://YOUR-LAB-ID.web-security-academy.net use
 
 Options:
 
-- `--workers N` — concurrent requests (default `10`).
-- `--dummy-password STR` — password used during the username-probe phase. The default is a long random string so it can't accidentally collide with a real password.
+**Tuning**
+- `--workers N` — concurrent requests (default `10`). Higher is faster but more conspicuous.
+- `--dummy-password STR` — password used during Phase 1. The default is a long random string so it can't accidentally collide with a real password.
+
+**Stealth**
+- `--jitter MIN-MAX` — random delay (seconds) before each request. Examples: `--jitter 0.5` (fixed 0.5s), `--jitter 0.5-2.0` (random in `[0.5, 2.0]`). Defeats simple rate-limiters. Pair with `--workers 1` for maximum stealth.
+
+**Session management**
+- `--fresh-session` — build a brand-new `Session` (cookie jar + connections) per request. Defeats per-session lockouts and tracking. Slower because each request does a fresh TCP+TLS handshake.
+- `--csrf` — two-step flow: `GET /login` to fetch a CSRF token, then `POST /login` with the token. Required for labs that protect the login form against CSRF; not needed for this specific lab but useful for other auth labs.
+- `--show-cookies` — print `Set-Cookie` headers returned by the server. Handy for understanding how the site tracks session state.
+
+Example with stealth + session management on:
+
+```bash
+python3 username_enum_solver.py \
+    https://YOUR-LAB-ID.web-security-academy.net \
+    usernames.txt passwords.txt \
+    --workers 1 --jitter 0.5-2.0 --fresh-session
+```
 
 ## Wordlists
 
