@@ -120,6 +120,36 @@ removes the throttle but costs money.
 The lab server itself does NOT rate-limit, so a Python script using
 `requests` + a small thread pool finishes both phases in seconds.
 
+BURP PROXY INTEGRATION (--proxy)
+--------------------------------
+Bypassing Intruder doesn't mean ignoring Burp entirely. A common
+workflow is to RUN this script WHILE Burp is open, with all of the
+script's traffic routed THROUGH Burp's proxy listener. Burp then
+records every request + response in its HTTP History tab, where you
+can:
+
+  - Inspect exactly what your script sent (great for debugging)
+  - Replay specific requests in Repeater
+  - Send interesting responses to Comparer/Scanner for deeper analysis
+  - Modify requests on the fly with Intercept
+
+Pass `--proxy burp` (shorthand for http://127.0.0.1:8080, Burp's
+default listener) to enable this routing. Or pass any other proxy
+URL: `--proxy http://127.0.0.1:9000`, etc.
+
+TLS NOTE: Burp performs a deliberate man-in-the-middle on HTTPS - it
+presents your client with a server certificate signed by Burp's OWN
+CA, not the real one. Python's `requests` will refuse this by default
+because Burp's CA isn't in your system trust store. So when --proxy
+is set, this script automatically disables TLS verification on its
+own requests (`verify=False`). This is a SCRIPT-LOCAL relaxation and
+does NOT modify your system trust store - other tools on your machine
+still validate certs normally.
+
+If you'd rather keep verification on, install Burp's CA into your
+trust store (visit http://burp/cert while proxied to download it),
+then pass --proxy without auto-disabling: see comments in build_session.
+
 ABOUT PORTSWIGGER LABS
 ----------------------
 PortSwigger's Web Security Academy is the standard free training
@@ -157,6 +187,8 @@ from urllib.parse import urlparse            # validates the user-supplied lab U
 
 # Third-party (install via:  pip install requests):
 import requests                              # popular HTTP client library
+import urllib3                               # `requests` ships with this - used to silence
+                                             # the InsecureRequestWarning when we proxy through Burp
 from requests.adapters import HTTPAdapter    # lets us tune the connection pool
 
 
@@ -201,14 +233,17 @@ class AttackConfig:
     use_csrf: bool                      # if True, fetch GET /login first to extract a CSRF token
     show_cookies: bool                  # if True, print Set-Cookie headers (debugging aid)
     dummy_password: str                 # the junk password used during Phase 1
+    proxy: str | None                   # if set, route requests through this proxy URL (e.g. Burp)
+    insecure: bool                      # if True, skip TLS verification (auto-on when proxy is set)
 
 
 # ---------------------------------------------------------------------
 # SESSION + REQUEST HELPERS
 # ---------------------------------------------------------------------
-def build_session(workers: int) -> requests.Session:
+def build_session(workers: int, proxy: str | None = None, insecure: bool = False) -> requests.Session:
     """
-    Build a requests.Session tuned for fast parallel use.
+    Build a requests.Session tuned for fast parallel use, optionally
+    routed through an upstream proxy (e.g. Burp Suite).
 
     WHY USE A SESSION INSTEAD OF requests.post() EACH TIME?
         A Session keeps a pool of open TCP connections to the server.
@@ -227,6 +262,23 @@ def build_session(workers: int) -> requests.Session:
     via Set-Cookie headers and includes them on subsequent requests.
     That's the same behavior as a browser keeping you "logged in"
     across page loads.
+
+    PROXY HANDLING (Burp Suite integration):
+        When `proxy` is given, every request the Session makes goes
+        to that proxy first, which forwards it to the real target
+        and forwards the response back. Burp records both directions
+        in its History tab as it sees them.
+
+    TLS HANDLING (when insecure=True):
+        Burp does a deliberate man-in-the-middle on HTTPS - it replies
+        with a server certificate signed by Burp's own CA. Python's
+        `requests` will reject that cert because Burp's CA isn't in
+        the system trust store, causing every request to fail. Setting
+        `s.verify = False` tells `requests` to skip cert validation
+        for this Session only. This is safe in a lab/pentest context
+        where you control both ends; do NOT use verify=False against
+        real production targets without proxying through Burp or
+        equivalent, because it disables a key TLS guarantee.
     """
     s = requests.Session()
 
@@ -244,6 +296,29 @@ def build_session(workers: int) -> requests.Session:
     # one for authorized testing so blue teams can tell your traffic
     # apart from real attackers.
     s.headers.update({"User-Agent": "portswigger-lab-solver/1.0"})
+
+    # ---- proxy + TLS configuration ----
+    if proxy:
+        # `requests` accepts a dict mapping scheme -> proxy URL.
+        # We set the same proxy for BOTH http and https because Burp's
+        # listener handles both schemes (it speaks HTTP to us and
+        # forwards either plain HTTP or HTTPS to the target).
+        s.proxies = {"http": proxy, "https": proxy}
+
+    if insecure:
+        # Skip TLS certificate validation. Required when proxying
+        # through Burp unless you've installed Burp's CA into your
+        # trust store. Don't use against real targets that you ISN'T
+        # routing through a deliberate MITM proxy - it removes a key
+        # part of TLS security.
+        #
+        # TO USE BURP'S CA INSTEAD (proper way):
+        #   1. With Burp running and proxying, visit http://burp/cert
+        #      in your browser to download `cacert.der`
+        #   2. Convert: openssl x509 -inform DER -in cacert.der \
+        #               -out burp-ca.pem
+        #   3. Replace this line with: s.verify = "/path/to/burp-ca.pem"
+        s.verify = False
 
     return s
 
@@ -263,8 +338,9 @@ def get_session(cfg: AttackConfig, shared: requests.Session | None) -> requests.
     if cfg.fresh_session:
         # Pool of 1 connection per session is plenty - this Session
         # is going to be used for exactly one request and then
-        # garbage-collected.
-        return build_session(workers=1)
+        # garbage-collected. We still forward proxy + insecure so
+        # fresh sessions also route through Burp if configured.
+        return build_session(workers=1, proxy=cfg.proxy, insecure=cfg.insecure)
     return shared
 
 
@@ -417,7 +493,7 @@ def enumerate_username(cfg: AttackConfig, usernames: list[str]) -> str | None:
     # If we're sharing a Session across all workers, build it once.
     # If --fresh-session is set, each probe builds its own and `shared`
     # is None.
-    shared = None if cfg.fresh_session else build_session(cfg.workers)
+    shared = None if cfg.fresh_session else build_session(cfg.workers, cfg.proxy, cfg.insecure)
 
     # `results` maps each username to its response fingerprint:
     #   {
@@ -529,7 +605,7 @@ def brute_password(cfg: AttackConfig, username: str, passwords: list[str]) -> st
     every probe to finish.
     """
     print(f"[*] phase 2: trying {len(passwords)} passwords against {username!r}")
-    shared = None if cfg.fresh_session else build_session(cfg.workers)
+    shared = None if cfg.fresh_session else build_session(cfg.workers, cfg.proxy, cfg.insecure)
     found: str | None = None
 
     def probe(p: str):
@@ -652,7 +728,50 @@ def main():
              "Useful for understanding how the site tracks session state.",
     )
 
+    # ---- Burp / proxy integration ----
+    ap.add_argument(
+        "--proxy",
+        metavar="URL",
+        help="Route every request through an HTTP proxy. Pass 'burp' as "
+             "shorthand for http://127.0.0.1:8080 (Burp's default listener). "
+             "Auto-enables --insecure because Burp re-signs TLS certs with "
+             "its own CA. You can pass any proxy URL; if you omit the "
+             "scheme, http:// is assumed.",
+    )
+    ap.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Skip TLS certificate verification. Auto-enabled by --proxy. "
+             "Only safe in lab / authorized-test contexts where you control "
+             "(or trust) the upstream proxy.",
+    )
+
     args = ap.parse_args()
+
+    # ---- Resolve proxy shorthand + auto-enable insecure ----
+    # `--proxy burp` -> the default Burp listener address.
+    # Any proxy without a scheme -> assume plain http:// to it.
+    proxy = args.proxy
+    insecure = args.insecure
+    if proxy:
+        if proxy.strip().lower() == "burp":
+            proxy = "http://127.0.0.1:8080"
+        elif "://" not in proxy:
+            # Tolerate things like `--proxy 127.0.0.1:8080`.
+            proxy = f"http://{proxy}"
+
+        # Auto-enable TLS bypass: Burp / mitmproxy / any intercepting
+        # proxy will present its OWN CA, which Python won't trust.
+        insecure = True
+
+        print(f"[*] routing through proxy: {proxy} (TLS verification disabled)")
+
+    if insecure:
+        # Silence the noisy "InsecureRequestWarning: Unverified HTTPS
+        # request is being made" that urllib3 prints to stderr for
+        # every request when verify=False. This is process-wide and
+        # only takes effect when we explicitly asked for insecure.
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     # ---- URL normalization ----
     # Accept whatever the user pasted (with a path, query string, etc.)
@@ -671,6 +790,8 @@ def main():
         use_csrf=args.csrf,
         show_cookies=args.show_cookies,
         dummy_password=args.dummy_password,
+        proxy=proxy,
+        insecure=insecure,
     )
 
     # ---- Load wordlists from disk ----

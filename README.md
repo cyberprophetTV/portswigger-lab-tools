@@ -46,6 +46,12 @@ Options:
 - `--csrf` — two-step flow: `GET /login` to fetch a CSRF token, then `POST /login` with the token. Required for labs that protect the login form against CSRF; not needed for this specific lab but useful for other auth labs.
 - `--show-cookies` — print `Set-Cookie` headers returned by the server. Handy for understanding how the site tracks session state.
 
+**Burp Suite integration**
+- `--proxy URL` — route every request through an HTTP proxy. Use `--proxy burp` as shorthand for `http://127.0.0.1:8080` (Burp's default listener). Auto-enables `--insecure` because Burp re-signs TLS certs with its own CA.
+- `--insecure` — skip TLS verification. Auto-enabled by `--proxy`. Only use in lab / authorized-test contexts where the upstream proxy is trusted.
+
+With Burp open and proxying, every request + response shows up in Burp's HTTP History tab. From there you can replay them in Repeater, send interesting ones to Comparer/Scanner, or intercept and modify mid-flight. Useful for understanding exactly what the script is sending and for follow-up testing.
+
 Example with stealth + session management on:
 
 ```bash
@@ -53,6 +59,15 @@ python3 username_enum_solver.py \
     https://YOUR-LAB-ID.web-security-academy.net \
     usernames.txt passwords.txt \
     --workers 1 --jitter 0.5-2.0 --fresh-session
+```
+
+Example routing through Burp at the default listener:
+
+```bash
+python3 username_enum_solver.py \
+    https://YOUR-LAB-ID.web-security-academy.net \
+    usernames.txt passwords.txt \
+    --proxy burp
 ```
 
 ## Wordlists
