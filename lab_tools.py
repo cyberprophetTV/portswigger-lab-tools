@@ -597,23 +597,27 @@ def confirm_and_run(console: Console, cmd: list[str], q_style: QStyle) -> int:
 # MAIN LOOP
 # ---------------------------------------------------------------------
 def main():
-    # Use a temporary console (no theme) for the banner + theme picker,
-    # since we don't know the theme yet.
-    plain = Console(highlight=False)
-    show_banner(plain)
+    # We need SOME theme loaded from the start because the banner and
+    # the theme-picker prompt themselves use style names like [primary]
+    # and [warning] that only resolve once a theme is active. Default
+    # to "neon" for the pre-pick UI; the user can switch in the picker.
+    console = make_console("neon")
+    show_banner(console)
 
-    if not show_disclaimer_acceptance(plain):
-        plain.print("[red]Declined. Exiting.[/red]")
+    if not show_disclaimer_acceptance(console):
+        console.print("[error]Declined. Exiting.[/error]")
         sys.exit(0)
 
-    theme_name = pick_theme(plain)
-    console = make_console(theme_name)
-    q_style = make_questionary_style(theme_name)
+    theme_name = pick_theme(console)
 
-    # Re-show the banner under the chosen theme so the user sees the
-    # transition take effect.
-    console.clear()
-    show_banner(console)
+    # Rebuild the console under the chosen theme (no-op if they picked
+    # neon, since it's already loaded) and re-render the banner so the
+    # user sees the theme transition take effect.
+    if theme_name != "neon":
+        console = make_console(theme_name)
+        console.clear()
+        show_banner(console)
+    q_style = make_questionary_style(theme_name)
 
     while True:
         tool = show_tool_menu(console)

@@ -133,3 +133,32 @@ class TestBuildCommand:
         # User didn't provide --maybe; it's absent from the answers dict
         cmd = build_command(tool, {"base": "x"})
         assert "--maybe" not in cmd
+
+
+# ---------------------------------------------------------------------
+# RENDER SMOKE TESTS
+# ---------------------------------------------------------------------
+# Regression for a real bug: show_banner used to be called with a
+# theme-less Console, but the banner content uses style names like
+# `primary` that only resolve via a Theme. Render-time crash on first
+# launch. These tests render the banner under every theme to catch
+# any such style mismatch before it ships.
+class TestBannerRender:
+    @pytest.mark.parametrize("theme_name", list(THEMES.keys()))
+    def test_show_banner_does_not_crash(self, theme_name):
+        import io
+        from rich.console import Console as RichConsole
+        # `record=True` + force_terminal makes the console capture
+        # styled output to a buffer instead of writing to a real TTY.
+        console = RichConsole(
+            theme=THEMES[theme_name],
+            file=io.StringIO(),
+            force_terminal=True,
+            width=80,
+        )
+        # Should not raise.
+        lab_tools.show_banner(console)
+        # Sanity-check: the buffer should contain our project name.
+        output = console.file.getvalue()
+        assert "portswigger" in output
+        assert "lab-tools" in output
