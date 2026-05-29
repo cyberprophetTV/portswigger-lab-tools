@@ -15,6 +15,7 @@ from intruder import (
     MARKER_RE, RawRequest, parse_range_spec, range_matches, Matcher,
     parse_jitter, sniper, battering_ram, pitchfork, cluster_bomb,
     apply_encoding, parse_encode_chain, ENCODERS,
+    write_json, write_csv, write_html, write_markdown,
 )
 
 
@@ -360,3 +361,96 @@ class TestParseEncodeChain:
     def test_unknown_encoder_exits(self):
         with pytest.raises(SystemExit):
             parse_encode_chain("rot13")
+
+
+# ---------------------------------------------------------------------
+# Output writers
+# ---------------------------------------------------------------------
+@pytest.fixture
+def sample_results():
+    return [
+        {"label": "sniper pos=0 value='admin'", "status": 200, "length": 3170,
+         "time": 0.18, "hit": True,  "error": None},
+        {"label": "sniper pos=0 value='guest'", "status": 200, "length": 3168,
+         "time": 0.12, "hit": False, "error": None},
+        {"label": "sniper pos=0 value='broken'", "status": None, "length": 0,
+         "time": 0.00, "hit": False, "error": "connection refused"},
+    ]
+
+
+class TestWriteJson:
+    def test_writes_valid_json(self, sample_results, tmp_path):
+        import json as json_mod
+        out = tmp_path / "out.json"
+        write_json(sample_results, out)
+        loaded = json_mod.loads(out.read_text())
+        assert loaded == sample_results
+
+
+class TestWriteCsv:
+    def test_writes_csv_with_header(self, sample_results, tmp_path):
+        import csv as csv_mod
+        out = tmp_path / "out.csv"
+        write_csv(sample_results, out)
+        rows = list(csv_mod.DictReader(out.open()))
+        assert len(rows) == 3
+        # CSV stringifies everything; check the values came through.
+        assert rows[0]["label"] == "sniper pos=0 value='admin'"
+        assert rows[0]["status"] == "200"
+        assert rows[0]["hit"] == "True"
+        # And errors landed in the right column for the failing row.
+        assert rows[2]["error"] == "connection refused"
+
+
+class TestWriteMarkdown:
+    def test_includes_summary_and_table(self, sample_results, tmp_path):
+        out = tmp_path / "out.md"
+        write_markdown(sample_results, out)
+        text = out.read_text()
+        # Summary numbers
+        assert "Total requests:** 3" in text
+        assert "Hits:** 1" in text
+        assert "Errors:** 1" in text
+        # Header row
+        assert "| Label | Status | Length |" in text
+        # Hit checkmark
+        assert "✓" in text
+        # The error message is in the table
+        assert "connection refused" in text
+
+    def test_escapes_pipe_in_label(self, tmp_path):
+        results = [{"label": "weird|label", "status": 200, "length": 0,
+                    "time": 0.0, "hit": True, "error": None}]
+        out = tmp_path / "x.md"
+        write_markdown(results, out)
+        assert r"weird\|label" in out.read_text()
+
+
+class TestWriteHtml:
+    def test_writes_full_html_doc(self, sample_results, tmp_path):
+        out = tmp_path / "out.html"
+        write_html(sample_results, out)
+        text = out.read_text()
+        assert "<!DOCTYPE html>" in text
+        assert "<title>Intruder results</title>" in text
+        # Summary
+        assert "Total: <b>3</b>" in text
+        assert "Hits: <b>1</b>" in text
+        # Hit row gets the .hit class for green highlighting
+        assert 'class="hit"' in text
+
+    def test_escapes_xss_in_label(self, tmp_path):
+        # CRITICAL: labels can contain payload strings including XSS.
+        # Writing them unescaped into HTML would actively execute the
+        # XSS payload when the report is opened. html.escape must
+        # neutralize <, >, ", ', &.
+        results = [{"label": "<script>alert(1)</script>",
+                    "status": 200, "length": 0, "time": 0.0,
+                    "hit": True, "error": None}]
+        out = tmp_path / "x.html"
+        write_html(results, out)
+        text = out.read_text()
+        # The literal script tag must NOT appear.
+        assert "<script>alert(1)</script>" not in text
+        # The escaped form must appear instead.
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text

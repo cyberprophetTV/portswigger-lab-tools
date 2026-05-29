@@ -165,7 +165,8 @@ password brute-force lab:
 # ---------------------------------------------------------------------
 import argparse                              # CLI parsing
 import base64                                # for --encode base64
-import html                                  # for --encode html
+import csv                                   # for --output-csv
+import html                                  # for --encode html + HTML report escaping
 import itertools                             # cartesian product for cluster bomb
 import json                                  # --output file format
 import random                                # jitter
@@ -402,6 +403,164 @@ def apply_encoding(payload: str, chain: list[str]) -> str:
     for name in chain:
         payload = ENCODERS[name](payload)
     return payload
+
+
+# ---------------------------------------------------------------------
+# OUTPUT WRITERS (--output / --output-csv / --output-html / --output-md)
+# ---------------------------------------------------------------------
+# All four take the same `results` list (one dict per request) and a
+# Path to write to. The shape is:
+#   { "label": str, "status": int|None, "length": int,
+#     "time": float, "error": str|None, "hit": bool }
+#
+# Why ship four formats?
+#   - JSON   for scripting (jq, pandas, your own glue)
+#   - CSV    for spreadsheets / pandas / sharing with non-coders
+#   - HTML   for sending a polished artifact to a client / your team
+#   - MD     for pasting into a Slack thread, GitHub issue, or notes
+# Each is ~30 lines. Cheap to provide; no reason not to.
+
+def write_json(results: list[dict], path: Path) -> None:
+    """Dump as a JSON array. indent=2 keeps it human-readable; drop for compact."""
+    path.write_text(json.dumps(results, indent=2) + "\n")
+
+
+def write_csv(results: list[dict], path: Path) -> None:
+    """
+    Standard CSV with header row. Field order is fixed (not alpha-
+    sorted) so the columns are predictable across runs - matters when
+    you're diffing two output files or feeding them to a downstream
+    script that expects a specific column order.
+    """
+    fieldnames = ["label", "status", "length", "time", "hit", "error"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        # extrasaction='ignore' silently drops any unexpected fields
+        # we don't know about - future-proofing if `results` ever grows.
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for r in results:
+            writer.writerow(r)
+
+
+def write_markdown(results: list[dict], path: Path) -> None:
+    """
+    GitHub-flavored Markdown table. Hits get a ✓; misses get a blank
+    cell. Errors get rendered in their own column.
+
+    Why MD? It's the lingua franca of dev tooling - paste it into
+    Slack, GitHub, your team wiki, a PR description.
+    """
+    n_total = len(results)
+    n_hits = sum(1 for r in results if r["hit"])
+    n_errors = sum(1 for r in results if r["error"])
+
+    lines = [
+        "# Intruder results",
+        "",
+        f"- **Total requests:** {n_total}",
+        f"- **Hits:** {n_hits}",
+        f"- **Errors:** {n_errors}",
+        "",
+        "| # | Label | Status | Length | Time (s) | Hit | Error |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for i, r in enumerate(results, start=1):
+        hit = "✓" if r["hit"] else ""
+        err = (r["error"] or "").replace("|", "\\|").replace("\n", " ")
+        # `|` in the label would break the table layout; escape it.
+        label = (r["label"] or "").replace("|", "\\|")
+        lines.append(
+            f"| {i} | {label} | {r['status']} | {r['length']} | "
+            f"{r['time']:.3f} | {hit} | {err} |"
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
+# Inline CSS for the HTML report - self-contained so the file works
+# anywhere with no external dependencies.
+HTML_TEMPLATE_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Intruder results</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         margin: 2em; color: #222; }
+  h1 { margin-top: 0; }
+  .summary { display: flex; gap: 2em; margin: 1em 0; }
+  .summary div { background: #f4f4f4; padding: 0.5em 1em; border-radius: 4px; }
+  .summary .hits  { background: #d4edda; }
+  .summary .errors { background: #f8d7da; }
+  table { border-collapse: collapse; width: 100%; font-family: monospace; font-size: 13px; }
+  th, td { border: 1px solid #ddd; padding: 4px 8px; text-align: left;
+           vertical-align: top; }
+  th { background: #f4f4f4; }
+  tr.hit { background: #d4edda; }
+  tr.error { background: #f8d7da; }
+  td.num { text-align: right; }
+  td.label { word-break: break-all; max-width: 40em; }
+</style>
+</head>
+<body>
+"""
+
+HTML_TEMPLATE_FOOT = """
+</tbody>
+</table>
+</body>
+</html>
+"""
+
+
+def write_html(results: list[dict], path: Path) -> None:
+    """
+    Polished standalone HTML report. Self-contained CSS, no external
+    fonts/JS - so it works behind air-gapped firewalls and emails as
+    a single attachment.
+
+    Rows get .hit (green) or .error (red) classes so they jump out
+    when you skim.
+
+    `html.escape` is non-negotiable: response labels can contain
+    arbitrary attacker-controlled payloads (XSS strings, for one).
+    Without escaping, opening the report could execute the very XSS
+    payloads we were testing. quote=True also escapes `'` and `"`.
+    """
+    n_total = len(results)
+    n_hits = sum(1 for r in results if r["hit"])
+    n_errors = sum(1 for r in results if r["error"])
+
+    parts = [HTML_TEMPLATE_HEAD]
+    parts.append("<h1>Intruder results</h1>")
+    parts.append('<div class="summary">')
+    parts.append(f'<div>Total: <b>{n_total}</b></div>')
+    parts.append(f'<div class="hits">Hits: <b>{n_hits}</b></div>')
+    if n_errors:
+        parts.append(f'<div class="errors">Errors: <b>{n_errors}</b></div>')
+    parts.append("</div>")
+
+    parts.append("<table>")
+    parts.append("<thead><tr>"
+                 "<th>#</th><th>Label</th><th>Status</th><th>Length</th>"
+                 "<th>Time (s)</th><th>Hit</th><th>Error</th>"
+                 "</tr></thead>")
+    parts.append("<tbody>")
+    for i, r in enumerate(results, start=1):
+        cls = "hit" if r["hit"] else ("error" if r["error"] else "")
+        cls_attr = f' class="{cls}"' if cls else ""
+        parts.append(
+            f"<tr{cls_attr}>"
+            f"<td class=\"num\">{i}</td>"
+            f'<td class="label">{html.escape(str(r["label"] or ""))}</td>'
+            f"<td class=\"num\">{r['status']}</td>"
+            f"<td class=\"num\">{r['length']}</td>"
+            f"<td class=\"num\">{r['time']:.3f}</td>"
+            f"<td>{'✓' if r['hit'] else ''}</td>"
+            f"<td>{html.escape(str(r['error'] or ''))}</td>"
+            f"</tr>"
+        )
+    parts.append(HTML_TEMPLATE_FOOT)
+    path.write_text("".join(parts))
 
 
 # =====================================================================
@@ -730,7 +889,7 @@ class FuzzConfig:
     mode: str
     target_url: str | None
     matcher: Matcher
-    output: Path | None
+    output: Path | None              # JSON output
     verbose: bool
     workers: int
     jitter: tuple[float, float]
@@ -739,6 +898,11 @@ class FuzzConfig:
     insecure: bool
     retries: int
     encode_chain: list[str] = field(default_factory=list)   # see ENCODERS
+    # Additional output formats (alongside --output JSON). All default
+    # to None = don't write. Multiple can be enabled at once.
+    output_csv: Path | None = None
+    output_html: Path | None = None
+    output_md: Path | None = None
 
 
 # =====================================================================
@@ -861,10 +1025,18 @@ def fuzz(cfg: FuzzConfig) -> None:
                     "hit": hit,
                 })
 
-    if cfg.output is not None:
-        cfg.output.write_text(json.dumps(results, indent=2))
-        n_hits = sum(1 for r in results if r["hit"])
-        print(f"{tag_info()} wrote {len(results)} results ({n_hits} hits) to {cfg.output}")
+    # ---- write any enabled output format(s) ----
+    n_hits = sum(1 for r in results if r["hit"])
+    for fmt, path, writer in [
+        ("json", cfg.output,      write_json),
+        ("csv",  cfg.output_csv,  write_csv),
+        ("html", cfg.output_html, write_html),
+        ("md",   cfg.output_md,   write_markdown),
+    ]:
+        if path is not None:
+            writer(results, path)
+            print(f"{tag_info()} wrote {len(results)} results ({n_hits} hits) "
+                  f"to {path}  ({fmt})")
 
 
 # =====================================================================
@@ -909,6 +1081,13 @@ def main():
     # ---- Output ----
     ap.add_argument("--output", type=Path, metavar="FILE.json",
                     help="Write every result (hit or not) as a JSON array")
+    ap.add_argument("--output-csv", type=Path, metavar="FILE.csv",
+                    help="Same data as --output, formatted as CSV (Excel/pandas)")
+    ap.add_argument("--output-html", type=Path, metavar="FILE.html",
+                    help="Standalone HTML report - self-contained, "
+                         "openable in a browser, shareable as a single file")
+    ap.add_argument("--output-md", type=Path, metavar="FILE.md",
+                    help="GitHub-flavored Markdown table")
     ap.add_argument("--verbose", action="store_true",
                     help="Print every result; dump first-hit request + body")
     # ---- Stealth / session (same set as username_enum_solver.py) ----
@@ -990,6 +1169,9 @@ def main():
         insecure=insecure,
         retries=args.retries,
         encode_chain=args.encode,
+        output_csv=args.output_csv,
+        output_html=args.output_html,
+        output_md=args.output_md,
     )
 
     fuzz(cfg)
