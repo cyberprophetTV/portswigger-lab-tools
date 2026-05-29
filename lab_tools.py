@@ -319,6 +319,33 @@ TOOLS: list[Tool] = [
         ],
     ),
     Tool(
+        key="exploit_server",
+        name="Exploit server (host payloads + tunnel for victim browser)",
+        script="exploit_server.py",
+        description=(
+            "Local HTTP server + optional public tunnel (cloudflared / "
+            "serveo / localhost.run) for delivering XSS / CSRF / file "
+            "payloads to a victim browser that can't reach your VM "
+            "directly. Logs every hit live with full path + query "
+            "string - so payloads that exfiltrate cookies via /log?c=... "
+            "show up in your terminal immediately."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("serve_cmd", "Subcommand", default="serve", kind="select",
+                   choices=["serve"]),
+            Prompt("directory", "Directory to serve  "
+                                "(holds your XSS/CSRF .html/.js payloads, e.g. ./payloads)",
+                   kind="path"),
+            Prompt("--port", "Local port to bind  (default 8000)",
+                   default="8000", required=False),
+            Prompt("--tunnel", "Public tunnel  "
+                               "(cloudflared = most reliable; serveo / localhost.run = SSH-based, zero install)",
+                   default="cloudflared", kind="select",
+                   choices=["cloudflared", "serveo", "localhost.run"]),
+        ],
+    ),
+    Tool(
         key="cyberchef",
         name="CyberChef (offline TUI - encode/decode/hash/parse)",
         script="cyberchef.py",
