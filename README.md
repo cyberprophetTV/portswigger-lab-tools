@@ -4,6 +4,15 @@ Small Python tools for solving PortSwigger [Web Security Academy](https://portsw
 
 **See [docs/walkthrough.md](docs/walkthrough.md) for an end-to-end annotated example** of solving the canonical username-enumeration lab with these tools.
 
+## BSCP-style rate limit safety
+
+The exam (and most real-world labs) will IP-ban you if you fuzz too aggressively. `intruder.py` has two layers of rate-limit defense:
+
+- **Proactive cap** — `--max-rps N` (e.g. `--max-rps 20`) puts a hard ceiling on your request rate. Combined with `--workers`, this is what you control. BSCP-polite values are 20–30 rps.
+- **Reactive backoff** — *always on*. If the server starts returning `429 Too Many Requests`, the rate limiter triggers exponential backoff (1s, 2s, 4s, 8s, ... capped at 60s) until you stop getting blocked. Resets on the first non-429 response.
+
+You can see how many 429s were triggered in the end-of-run summary line.
+
 ## Quick start: launcher
 
 ```bash
@@ -29,6 +38,7 @@ If you'd rather use the CLI directly, every tool is self-contained and runs on `
 | [`security_audit.py`](security_audit.py) | One-GET passive audit: missing CSP/HSTS/X-Frame-Options/etc., cookies lacking HttpOnly/Secure/SameSite, tech-stack disclosure headers | Any URL, including post-auth pages with `--cookie-jar` |
 | [`jwt_tool.py`](jwt_tool.py) | JWT analyzer with attack helpers: `decode` (with security observations), `none` (alg=none forgery in three casings), `brute` (HS256 wordlist attack), `sign` (re-sign with known secret), `kid` (kid-header injection variants). CLI subcommands only — not in the launcher menu. | Any JWT-using lab |
 | [`privesc.py`](privesc.py) | Dual-token access-control comparator. Replays a URL list under two cookie jars (admin + low-priv) and classifies each pair: `IDOR_LIKELY`, `CONTENT_DELTA`, `BYPASS`, `EXPECTED_BLOCK`, etc. Uses `difflib.SequenceMatcher.ratio()` for body similarity scoring. | BSCP-style IDOR / broken access control labs |
+| [`decode_tool.py`](decode_tool.py) | Counterpart to `intruder.py --encode`. Subcommands: `url`, `double-url`, `base64`, `hex`, `html`, `chain` (apply nested decodings outermost-first), `auto` (try every decoder, surface readable results). Auto-detects JWTs and surfaces decoded header + payload. | Any encoded blob — cookies, tokens, query params |
 
 ## Disclaimer — Educational use only
 

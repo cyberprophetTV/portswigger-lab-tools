@@ -194,6 +194,7 @@ from _common import (
     tag_hit, tag_miss, tag_info, tag_ok, tag_warn, tag_err,
     progress, bold, dim,
 )
+from _ratelimit import RateLimiter
 
 
 # ---------------------------------------------------------------------
@@ -1013,6 +1014,14 @@ class FuzzConfig:
     # on the OOB server means SOMETHING parsed our payload server-
     # side - SSRF, blind SQLi, blind XXE, log4j-style, etc.
     oob_host: str | None = None
+    # Rate limiting. 0 = no proactive cap (only 429-reactive backoff).
+    # Set --max-rps to a polite value (e.g. 20-30) for BSCP-style
+    # labs that will IP-ban aggressive scanners.
+    max_rps: float = 0
+    # Emit results as NDJSON (one JSON object per line) instead of
+    # the human-readable [HIT]/[   ] lines. For piping to jq, feeding
+    # to AI orchestrators, parsing in downstream scripts.
+    json_output: bool = False
 
 
 # =====================================================================
@@ -1064,27 +1073,41 @@ def fuzz(cfg: FuzzConfig) -> None:
         iter_fn = pitchfork if cfg.mode == "pitchfork" else cluster_bomb
         iterations = list(iter_fn(template, payload_sets))
 
-    print(f"{tag_info()} target  : {bold(scheme + '://' + host)}")
-    print(f"{tag_info()} markers : {n_markers} in template")
-    print(f"{tag_info()} payloads: {[len(ps) for ps in payload_sets]}")
-    print(f"{tag_info()} mode    : {cfg.mode}")
-    print(f"{tag_info()} queued  : {len(iterations)} requests")
-    print(f"{tag_info()} workers : {cfg.workers}"
-          + (f"  jitter {cfg.jitter[0]}-{cfg.jitter[1]}s" if cfg.jitter[1] > 0 else "")
-          + ("  fresh-session" if cfg.fresh_session else ""))
+    # When --json is on, all human-readable output goes to stderr so
+    # stdout stays clean for the NDJSON stream. `_log` is the
+    # printer everywhere a status / summary line is emitted.
+    _log = (lambda *a, **kw: print(*a, **{**kw, "file": sys.stderr})
+            if cfg.json_output else print)
+
+    _log(f"{tag_info()} target  : {bold(scheme + '://' + host)}")
+    _log(f"{tag_info()} markers : {n_markers} in template")
+    _log(f"{tag_info()} payloads: {[len(ps) for ps in payload_sets]}")
+    _log(f"{tag_info()} mode    : {cfg.mode}")
+    _log(f"{tag_info()} queued  : {len(iterations)} requests")
+    _log(f"{tag_info()} workers : {cfg.workers}"
+         + (f"  jitter {cfg.jitter[0]}-{cfg.jitter[1]}s" if cfg.jitter[1] > 0 else "")
+         + (f"  max-rps={cfg.max_rps}" if cfg.max_rps > 0 else "")
+         + ("  fresh-session" if cfg.fresh_session else ""))
     if cfg.proxy:
-        print(f"{tag_info()} proxy   : {cfg.proxy} (TLS verification disabled)")
+        _log(f"{tag_info()} proxy   : {cfg.proxy} (TLS verification disabled)")
 
     # ---- Build shared session unless --fresh-session ----
     shared = None if cfg.fresh_session else build_session(
         cfg.workers, cfg.proxy, cfg.insecure, cfg.retries,
         cookies=cfg.cookies)
 
+    # ---- Rate limiter (proactive cap + reactive 429 backoff) ----
+    rate_limiter = RateLimiter(max_rps=cfg.max_rps)
+
     results = []
     first_hit_dumped = False
 
     def worker(item):
         label, req, payloads = item
+        # The rate limiter gate runs BEFORE jitter so we honor the
+        # hard cap regardless of jitter setting. Jitter then adds
+        # human-like variability ON TOP of the cap.
+        rate_limiter.wait_if_needed()
         maybe_jitter(cfg.jitter)
         sess = (build_session(1, cfg.proxy, cfg.insecure, cfg.retries,
                               cookies=cfg.cookies)
@@ -1116,9 +1139,12 @@ def fuzz(cfg: FuzzConfig) -> None:
 
         try:
             r, elapsed = send(sess, req, host, scheme)
+            # Inform the rate limiter so it can start backing off on 429s.
+            rate_limiter.report_response(r.status_code)
             return label, req, payloads, r.status_code, len(r.content), r.text, elapsed, None, oob_id
         except requests.exceptions.RequestException as e:
             # Connection errors, DNS failures, timeouts, etc.
+            rate_limiter.report_response(None)
             return label, req, payloads, None, 0, "", 0.0, str(e), oob_id
 
     with ThreadPoolExecutor(max_workers=cfg.workers) as ex:
@@ -1142,13 +1168,32 @@ def fuzz(cfg: FuzzConfig) -> None:
 
             if err:
                 hit = False
-                print(f"{tag_err()} {label}: {err}")
             else:
                 hit = cfg.matcher.matches(status, length, body, elapsed)
-                # Print either:
-                #   - every result if --verbose OR no matchers configured
-                #   - only hits if matchers configured and not verbose
-                if hit or cfg.verbose or not cfg.matcher.any_enabled():
+
+            if cfg.json_output:
+                # NDJSON line per result. Suppress the human-readable
+                # output entirely so stdout is clean for piping.
+                line = {
+                    "label": label,
+                    "status": status,
+                    "length": length,
+                    "time": round(elapsed, 4),
+                    "error": err,
+                    "hit": hit,
+                }
+                if cfg.detect_reflection:
+                    line["reflected"] = reflected
+                if cfg.oob_host:
+                    line["oob_id"] = oob_id
+                # json.dumps handles None / weird chars safely. flush
+                # so consumers (jq, AI orchestrators) see lines as
+                # they're produced, not all at once at the end.
+                print(json.dumps(line), flush=True)
+            else:
+                if err:
+                    print(f"{tag_err()} {label}: {err}")
+                elif hit or cfg.verbose or not cfg.matcher.any_enabled():
                     flag = tag_hit() if hit else tag_miss()
                     refl = "  REFLECTED" if reflected else ""
                     print(f"{flag} {label}  status={status} len={length} "
@@ -1192,8 +1237,14 @@ def fuzz(cfg: FuzzConfig) -> None:
     ]:
         if path is not None:
             writer(results, path)
-            print(f"{tag_info()} wrote {len(results)} results ({n_hits} hits) "
-                  f"to {path}  ({fmt})")
+            _log(f"{tag_info()} wrote {len(results)} results ({n_hits} hits) "
+                 f"to {path}  ({fmt})")
+
+    # ---- rate-limiter summary (when it actually did something) ----
+    rl_stats = rate_limiter.stats()
+    if rl_stats["total_blocks_seen"] > 0:
+        _log(f"{tag_warn()} rate limiter: {rl_stats['total_blocks_seen']} 429 response(s), "
+             f"{rl_stats['total_backoffs_triggered']} backoff(s) triggered")
 
 
 # =====================================================================
@@ -1260,6 +1311,17 @@ def main():
                          "(SSRF, blind SQLi, blind XXE, log4shell, etc.). "
                          "Use your own interactsh / canarytoken / "
                          "webhook.site / DNS-canary host.")
+    # ---- Rate limiting + machine-readable output ----
+    ap.add_argument("--max-rps", type=float, default=0, metavar="N",
+                    help="Cap proactive request rate to N per second. "
+                         "0 = unlimited (only reactive 429 backoff). "
+                         "BSCP-style labs IP-ban above ~50; 20-30 is polite. "
+                         "Reactive 429-backoff is ALWAYS on.")
+    ap.add_argument("--json", action="store_true", dest="json_output",
+                    help="Emit results as NDJSON (one JSON object per line) "
+                         "instead of human-readable [HIT] lines. Suppresses "
+                         "the colored output entirely - intended for piping "
+                         "to `jq` or to an AI orchestration layer.")
     # ---- Stealth / session (same set as username_enum_solver.py) ----
     ap.add_argument("--workers", type=int, default=10,
                     help="Concurrent requests (default 10)")
@@ -1401,6 +1463,8 @@ def main():
         cookies=cookies,
         detect_reflection=args.detect_reflection,
         oob_host=args.oob_host,
+        max_rps=args.max_rps,
+        json_output=args.json_output,
     )
 
     fuzz(cfg)

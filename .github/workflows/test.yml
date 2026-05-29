@@ -41,6 +41,8 @@ jobs:
           python3 jwt_tool.py decode --help > /dev/null
           python3 security_audit.py --help > /dev/null
           python3 privesc.py --help > /dev/null
+          python3 decode_tool.py --help > /dev/null
+          python3 decode_tool.py url --help > /dev/null
 
       - name: Smoke-test lab_tools imports
         # Can't actually run lab_tools in CI (interactive prompts),
