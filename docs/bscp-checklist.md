@@ -142,7 +142,7 @@ ngrok's free tier now requires signup + auth-token configuration, and tunnels di
 
 ---
 
-## Seven exam pitfalls that get most people stuck
+## Eight exam pitfalls that get most people stuck
 
 These mirror what experienced BSCP takers warn about. Each maps to a specific tool in this repo.
 
@@ -282,6 +282,41 @@ python3 intruder.py req.txt --payload path-traversal-payloads.txt \
 ```
 
 See [`examples/workflow-identity-switch.json`](../examples/workflow-identity-switch.json) for the canonical login-A → clear → login-B chain.
+
+### 8. The "don't get stuck" rule (built into the launcher)
+
+> *BSCP rule #1: if you've been on one approach for 10+ minutes without progress, you're wasting exam time. Switch angles — different tool, different payload class, different vulnerability hypothesis.*
+
+`lab_tools.py` now enforces this:
+
+- Tracks **cumulative time per tool** in the current launcher session.
+- Shows a running tally between selections so you SEE where the time is going.
+- Pre-flight **warning panel** if you pick a tool that's already consumed more than `--time-limit MINUTES` (default 15) total this session.
+
+```bash
+python3 lab_tools.py --time-limit 10
+# After 10 cumulative minutes on `intruder`, picking it again triggers:
+#   ⚠  stuck-time warning
+#   You've spent 12 min on this tool already.
+#   BSCP rule #1: don't get stuck. Consider attacking the same
+#   vulnerability from a different angle - maybe a different tool,
+#   different payload class, or check whether you've misidentified
+#   the bug class entirely.
+```
+
+Between selections you also see:
+
+```
+Session time tracker  (warn after 15 min/tool)
+┌────────────┬──────┬──────────┬───────────────────────────────┐
+│ Tool       │ Runs │ Time     │ Status                        │
+├────────────┼──────┼──────────┼───────────────────────────────┤
+│ intruder   │    4 │ 18.3 min │ stuck — try another angle    │
+│ workflow   │    2 │  5.1 min │ ok                            │
+│ cyberchef  │    7 │  3.0 min │ ok                            │
+└────────────┴──────┴──────────┴───────────────────────────────┘
+  Total session time: 26.4 min
+```
 
 ---
 

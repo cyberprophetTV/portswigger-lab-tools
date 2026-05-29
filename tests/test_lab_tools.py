@@ -15,7 +15,9 @@ pytest.importorskip("rich")
 pytest.importorskip("questionary")
 
 import lab_tools
-from lab_tools import TOOLS, THEMES, Tool, Prompt, build_command, check_paths
+from lab_tools import (
+    TOOLS, THEMES, Tool, Prompt, build_command, check_paths, RuleTracker,
+)
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -192,6 +194,68 @@ class TestCheckPaths:
                     path = Path(__file__).parent.parent / p.default
                     assert path.exists(), \
                         f"tool {t.key!r}: missing default file {p.default!r}"
+
+
+class TestRuleTracker:
+    def test_empty_tracker_is_not_stuck(self):
+        t = RuleTracker(time_limit_minutes=15.0)
+        assert not t.is_stuck("any_tool")
+        assert t.total_seconds() == 0
+
+    def test_records_per_tool_time(self):
+        t = RuleTracker()
+        t.record("intruder", 60.0)
+        t.record("intruder", 30.0)
+        t.record("workflow", 10.0)
+        assert t.spent["intruder"] == 90.0
+        assert t.spent["workflow"] == 10.0
+        assert t.runs["intruder"] == 2
+        assert t.runs["workflow"] == 1
+        assert t.total_seconds() == 100.0
+
+    def test_stuck_threshold(self):
+        t = RuleTracker(time_limit_minutes=1.0)   # 60-second threshold
+        t.record("intruder", 30.0)
+        assert not t.is_stuck("intruder")
+        t.record("intruder", 31.0)        # cumulative 61 - over threshold
+        assert t.is_stuck("intruder")
+
+    def test_other_tool_not_marked_stuck(self):
+        # Only the tool that exceeded the threshold is "stuck", not
+        # other tools that have separate accumulators.
+        t = RuleTracker(time_limit_minutes=1.0)
+        t.record("intruder", 120.0)
+        t.record("workflow", 5.0)
+        assert t.is_stuck("intruder")
+        assert not t.is_stuck("workflow")
+
+    def test_render_does_not_crash_under_themes(self):
+        # Smoke test - tracker.render should produce output without
+        # exception under every defined theme.
+        import io
+        from rich.console import Console
+        t = RuleTracker(time_limit_minutes=1.0)
+        t.record("intruder", 70.0)        # stuck
+        t.record("workflow", 5.0)         # not stuck
+        for theme_name in THEMES:
+            console = Console(theme=THEMES[theme_name], file=io.StringIO(),
+                                force_terminal=True, width=120)
+            t.render(console)
+            out = console.file.getvalue()
+            assert "intruder" in out
+            assert "workflow" in out
+            # The stuck warning text should appear for intruder
+            assert "stuck" in out
+
+    def test_render_skipped_when_no_runs(self):
+        import io
+        from rich.console import Console
+        t = RuleTracker()
+        console = Console(theme=THEMES["neon"], file=io.StringIO(),
+                            force_terminal=True, width=80)
+        t.render(console)
+        # Nothing recorded -> nothing rendered.
+        assert console.file.getvalue() == ""
 
 
 class TestBannerRender:

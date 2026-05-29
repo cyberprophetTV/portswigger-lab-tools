@@ -100,10 +100,12 @@ After the tool exits, we loop back to the main menu.
 # ---------------------------------------------------------------------
 # IMPORTS
 # ---------------------------------------------------------------------
+import argparse
 import os
 import shlex                                 # for quoting CLI args correctly
 import subprocess
 import sys
+import time                                  # monotonic elapsed-time tracker
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -759,13 +761,70 @@ def build_command(tool: Tool, answers: dict[str, str]) -> list[str]:
     return cmd
 
 
-def confirm_and_run(console: Console, cmd: list[str], q_style: QStyle) -> int:
+# =====================================================================
+# RULE TRACKER - per-tool elapsed-time tracking with "don't get stuck" alerts
+# =====================================================================
+# The #1 BSCP rule is "don't get stuck on one approach for too long."
+# We enforce it by tracking how long the user has spent in EACH tool
+# this launcher session, and:
+#   - Showing a running tally between selections (so they SEE where
+#     the time is going).
+#   - Flashing a warning if a single tool's accumulated time exceeds
+#     `time_limit_minutes`. The suggestion: try a different angle
+#     on the same vulnerability, not more of the same tool.
+#
+# All state is per-launcher-session (no disk persistence) - intentional;
+# each exam attempt is independent.
+@dataclass
+class RuleTracker:
+    time_limit_minutes: float = 15.0    # default: warn after 15 min on one tool
+    spent: dict[str, float] = field(default_factory=dict)   # tool_key -> seconds
+    runs:  dict[str, int]   = field(default_factory=dict)   # tool_key -> invocation count
+
+    def record(self, tool_key: str, elapsed_seconds: float) -> None:
+        self.spent[tool_key] = self.spent.get(tool_key, 0.0) + elapsed_seconds
+        self.runs[tool_key] = self.runs.get(tool_key, 0) + 1
+
+    def is_stuck(self, tool_key: str) -> bool:
+        """True if this tool has now consumed > time_limit_minutes."""
+        return self.spent.get(tool_key, 0.0) > (self.time_limit_minutes * 60)
+
+    def total_seconds(self) -> float:
+        return sum(self.spent.values())
+
+    def render(self, console: Console) -> None:
+        """Print a compact per-tool tally. Skipped if nothing's been run."""
+        if not self.spent:
+            return
+        console.print()
+        table = Table(title=f"Session time tracker  (warn after {self.time_limit_minutes:.0f} min/tool)",
+                       title_style="primary", border_style="muted",
+                       show_lines=False)
+        table.add_column("Tool", style="primary")
+        table.add_column("Runs",  style="accent",  justify="right")
+        table.add_column("Time",  style="success", justify="right")
+        table.add_column("Status")
+        for key, secs in sorted(self.spent.items(), key=lambda kv: -kv[1]):
+            mins = secs / 60.0
+            status = ("[error]stuck — try another angle[/error]"
+                       if self.is_stuck(key) else "[muted]ok[/muted]")
+            table.add_row(key, str(self.runs[key]), f"{mins:5.1f} min", status)
+        console.print(table)
+        total_min = self.total_seconds() / 60.0
+        console.print(f"  [muted]Total session time: {total_min:.1f} min[/muted]")
+
+
+def confirm_and_run(console: Console, cmd: list[str], q_style: QStyle) -> tuple[int, float]:
     """
-    Show the assembled command, ask the user to confirm, then exec it.
+    Show the assembled command, ask the user to confirm, exec it,
+    and return (returncode, elapsed_seconds).
 
     Showing the command is intentional: it teaches the user exactly
     what shell command they would have typed to run this tool directly.
     Next time they don't need the launcher unless they want to.
+
+    Elapsed time goes into the per-session RuleTracker so the launcher
+    can warn when a tool eats too much time.
     """
     # shlex.join quotes each arg so the displayed line is paste-safe.
     rendered = shlex.join(cmd)
@@ -779,21 +838,32 @@ def confirm_and_run(console: Console, cmd: list[str], q_style: QStyle) -> int:
         padding=(0, 2),
     ))
 
-    go = questionary.confirm("Run it now?", default=True, qmark="›", style=q_style).ask()
+    go = questionary.confirm("Run it now?", default=True, qmark="", style=q_style).ask()
     if not go:
-        return -1
+        return -1, 0.0
 
     console.print()
     # subprocess.run with no `capture_output` lets the tool's stdout/stderr
     # stream live to the user's terminal - including our color tags.
+    start = time.monotonic()
     result = subprocess.run(cmd)
-    return result.returncode
+    elapsed = time.monotonic() - start
+    return result.returncode, elapsed
 
 
 # ---------------------------------------------------------------------
 # MAIN LOOP
 # ---------------------------------------------------------------------
 def main():
+    # ---- CLI: --time-limit lets the user tune the "you're stuck" threshold ----
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
+    ap.add_argument("--time-limit", type=float, default=15.0, metavar="MINUTES",
+                    help="Warn when accumulated time on a single tool exceeds N "
+                         "minutes (default 15). Enforces the BSCP-exam "
+                         "'don't get stuck' rule.")
+    args = ap.parse_args()
+    tracker = RuleTracker(time_limit_minutes=args.time_limit)
+
     # We need SOME theme loaded from the start because the banner and
     # the theme-picker prompt themselves use style names like [primary]
     # and [warning] that only resolve once a theme is active. Default
@@ -817,12 +887,36 @@ def main():
     q_style = make_questionary_style(theme_name)
 
     while True:
+        # Show the running session-time tracker between selections so
+        # the user always sees where their time is going. Skipped on
+        # the very first iteration (nothing to show yet).
+        tracker.render(console)
+
         tool = show_tool_menu(console)
         if tool is None:
             console.print("[muted]bye[/muted]")
             break
 
         show_tool_intro(console, tool)
+
+        # Pre-flight "you're stuck" warning - if this tool has ALREADY
+        # consumed > time_limit_minutes in this session, warn BEFORE
+        # the user commits to another invocation.
+        if tracker.is_stuck(tool.key):
+            mins = tracker.spent.get(tool.key, 0.0) / 60.0
+            console.print(Panel(
+                Text.assemble(
+                    (f"You've spent {mins:.0f} min on this tool already.\n", "error"),
+                    ("BSCP rule #1: don't get stuck. ", "warning"),
+                    "Consider attacking the same vulnerability from a ",
+                    ("different angle", "accent"),
+                    " - maybe a different tool, different payload class, "
+                    "or check whether you've misidentified the bug class entirely.",
+                ),
+                title="⚠  stuck-time warning",
+                border_style="error",
+                padding=(1, 2),
+            ))
 
         # Sanity check: does the script we're about to invoke even exist?
         script_path = Path(__file__).parent / tool.script
@@ -853,13 +947,18 @@ def main():
         # to be safe regardless of cwd.
         cmd[1] = str(script_path)
 
-        rc = confirm_and_run(console, cmd, q_style)
+        rc, elapsed = confirm_and_run(console, cmd, q_style)
         if rc == -1:
             console.print("[muted]skipped[/muted]")
-        elif rc == 0:
-            console.print("[success]tool exited successfully[/success]")
         else:
-            console.print(f"[error]tool exited with code {rc}[/error]")
+            tracker.record(tool.key, elapsed)
+            elapsed_min = elapsed / 60.0
+            if rc == 0:
+                console.print(f"[success]tool exited successfully[/success]  "
+                              f"[muted]({elapsed_min:.1f} min)[/muted]")
+            else:
+                console.print(f"[error]tool exited with code {rc}[/error]  "
+                              f"[muted]({elapsed_min:.1f} min)[/muted]")
 
         # Ask whether to loop back to the menu or quit.
         again = questionary.confirm(
