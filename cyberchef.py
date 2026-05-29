@@ -488,6 +488,26 @@ def identify_format(text: str) -> list[FormatHint]:
     if not s:
         return hints
 
+    # ---- Modern password-hash formats (structured, very distinctive) ----
+    # Bcrypt: $2a$ / $2b$ / $2x$ / $2y$  $cost$  22-char salt + 31-char hash
+    if re.fullmatch(r"\$2[abxy]?\$\d{2}\$[./A-Za-z0-9]{53}", s):
+        hints.append(FormatHint(
+            "Bcrypt password hash",
+            "VERY slow to crack - hashcat -m 3200, only worth a tiny targeted wordlist"))
+    # crypt(3) family: $1$ MD5, $5$ SHA-256, $6$ SHA-512, $y$ yescrypt
+    if re.match(r"\$(1|5|6|y|sha1)\$", s):
+        algo_map = {"1": "MD5-crypt", "5": "SHA256-crypt", "6": "SHA512-crypt",
+                     "y": "yescrypt", "sha1": "SHA1-crypt"}
+        algo_id = s.split("$")[1]
+        hints.append(FormatHint(
+            f"crypt(3) hash ({algo_map.get(algo_id, 'unknown')}, /etc/shadow format)",
+            "format is $algo$rounds$salt$hash - hashcat -m 500/7400/1800/29800"))
+    # Argon2 (modern)
+    if s.startswith("$argon2"):
+        hints.append(FormatHint(
+            "Argon2 password hash",
+            "memory-hard - virtually uncrackable without leaked passwords / context"))
+
     # ---- Cryptographic hashes (length-based) ----
     # These run BEFORE the generic "hex bytes" detector below so we
     # surface the more-specific hash interpretation first.
@@ -537,6 +557,34 @@ def identify_format(text: str) -> list[FormatHint]:
         hints.append(FormatHint(
             "IPv4 address",
             "candidate for SSRF target, X-Forwarded-For spoof, IP-based ACL bypass"))
+
+    # ---- IPv4 CIDR range ----
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)\.(\d+)/(\d+)", s)
+    if m and all(0 <= int(o) <= 255 for o in m.groups()[:4]) \
+           and 0 <= int(m.group(5)) <= 32:
+        hints.append(FormatHint(
+            "IPv4 CIDR range (network block)",
+            "useful for scope definition / sweeping a subnet"))
+
+    # ---- IPv6 (compressed or full) ----
+    # Stricter than just "hex+colons" - require EITHER the '::'
+    # compression marker OR exactly 7 colons (full 8-group form).
+    # This excludes MAC addresses (5 colons, 6 chunks) which would
+    # otherwise match the looser pattern.
+    if (re.fullmatch(r"[0-9a-fA-F:]+", s)
+            and all(len(chunk) <= 4 for chunk in s.split(":"))
+            and ("::" in s or s.count(":") == 7)
+            and s.count(":") >= 2):
+        hints.append(FormatHint(
+            "IPv6 address",
+            "many filters miss IPv6 - test for SSRF / parser bypass via ::1, ::ffff:..."))
+
+    # ---- MAC address ----
+    if re.fullmatch(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}", s):
+        hints.append(FormatHint(
+            "MAC address",
+            "first 3 bytes are vendor OUI - lookup to identify the hardware. "
+            "UUID v1 contains a MAC too."))
 
     # ---- Unix epoch ----
     # 10 digits: seconds since 1970. Plausible range: 2001-2286.
@@ -607,16 +655,106 @@ def identify_format(text: str) -> list[FormatHint]:
             "Looks like URL query string",
             "use `pqs` to parse into key/value pairs"))
 
+    # ---- MongoDB ObjectId (24 hex chars - not the same as MD5 / SHA-1) ----
+    if re.fullmatch(r"[a-fA-F0-9]{24}", s):
+        hints.append(FormatHint(
+            "MongoDB ObjectId (12 bytes)",
+            "first 4 bytes = timestamp (decode as hex epoch), next 5 = machine+pid, "
+            "last 3 = counter. Sequential IDs leak when records were created."))
+
+    # ---- Vendor-specific API keys / tokens (high-confidence prefixes) ----
+    if re.fullmatch(r"(AKIA|ASIA)[A-Z0-9]{16}", s):
+        kind = "permanent" if s.startswith("AKIA") else "temporary (STS)"
+        hints.append(FormatHint(
+            f"AWS access key ID ({kind})",
+            "CRITICAL if exposed. Pair with a 40-char secret = full AWS access. "
+            "Don't actually use it; report immediately."))
+    if re.fullmatch(r"gh[pousr]_[A-Za-z0-9]{36,}", s):
+        kind = {"p": "Personal Access Token", "o": "OAuth", "u": "User-to-server",
+                "s": "Server-to-server", "r": "Refresh"}.get(s[2], "")
+        hints.append(FormatHint(
+            f"GitHub token ({kind})",
+            "CRITICAL if exposed - revoke at github.com/settings/tokens. "
+            "Test scope with `gh api user`."))
+    if re.fullmatch(r"(sk|pk|rk)_(test|live)_[A-Za-z0-9]{20,}", s):
+        kind = "SECRET" if s.startswith("sk_") else (
+               "publishable (intended public)" if s.startswith("pk_") else "restricted")
+        env = "TEST sandbox" if "_test_" in s else "LIVE production"
+        hints.append(FormatHint(
+            f"Stripe API key ({kind}, {env})",
+            "sk_live_ exposed = real money on the line - report immediately"))
+    if re.match(r"xox[abprs]-\d+-\d+-", s):
+        kind_map = {"b": "Bot", "p": "User", "a": "OAuth-app", "r": "Refresh", "s": "Server"}
+        kind = kind_map.get(s[3], "unknown")
+        hints.append(FormatHint(
+            f"Slack token ({kind})",
+            "CRITICAL if exposed - try `https://slack.com/api/auth.test` to validate"))
+    if re.fullmatch(r"glpat-[A-Za-z0-9_-]{20}", s):
+        hints.append(FormatHint(
+            "GitLab personal access token",
+            "CRITICAL if exposed - revoke at GitLab user settings"))
+
+    # ---- Attack-payload signals (the user pasted a payload to see if it looks right) ----
+    if re.search(r"\.\.[/\\]", s) or "%2e%2e" in s.lower() or "..%2f" in s.lower():
+        hints.append(FormatHint(
+            "Path traversal payload (../ or %2e%2e variant)",
+            "test against file-reading endpoints: file=, page=, include=, view=, etc."))
+    if re.search(r"(\bUNION\s+SELECT\b|\bOR\s+\d+\s*=\s*\d+|--\s*$|/\*.*\*/|;\s*DROP\b|"
+                 r"information_schema|SLEEP\s*\(|BENCHMARK\s*\()", s, re.IGNORECASE):
+        hints.append(FormatHint(
+            "SQL injection payload",
+            "test against any DB-bound input. SLEEP() variant = time-based blind "
+            "(use intruder --baseline-samples + --match-time-delta)"))
+    if re.search(r"<script\b|<img[^>]+\bonerror\b|javascript:|on(load|click|error|focus)\s*=",
+                  s, re.IGNORECASE):
+        hints.append(FormatHint(
+            "XSS payload",
+            "test in any input that gets reflected back into HTML. "
+            "Use intruder --detect-reflection to find the reflection points first"))
+    if re.search(r"\{\{[^}]+\}\}|\$\{[^}]+\}|<%[^%]+%>|#\{[^}]+\}", s):
+        hints.append(FormatHint(
+            "Template injection probe ({{ }}, ${}, <% %>, #{})",
+            "if the server renders this and the output reflects, you have RCE. "
+            "Test against Jinja2 / ERB / Velocity / Freemarker / Thymeleaf"))
+    if re.search(r"(jndi|ldap):/?/", s, re.IGNORECASE):
+        hints.append(FormatHint(
+            "JNDI / LDAP injection probe (think log4shell)",
+            "test against any logged input. Pair with --oob-host to catch outbound calls"))
+
+    # ---- Possible HTTP Basic auth value: base64 of user:pass ----
+    # Only flag when the base64-decoded result has a single ':' and is
+    # printable - avoids false-positives on every random base64 blob.
+    if re.fullmatch(r"[A-Za-z0-9+/]+=*", s) and len(s) >= 8 and len(s) % 4 == 0:
+        try:
+            decoded = base64.b64decode(s).decode("utf-8")
+            if decoded.count(":") == 1 and all(c.isprintable() for c in decoded):
+                hints.append(FormatHint(
+                    "Possibly HTTP Basic auth value (base64 of user:pass)",
+                    "decode with b64d to see the credentials directly"))
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            pass
+
     # ---- Generic base64 (only if not already classified above) ----
-    if re.fullmatch(r"[A-Za-z0-9+/_-]+=*", s) and len(s) >= 8 and len(s) % 4 == 0 \
-            and not any(h.label.startswith("JWT") for h in hints):
+    # De-noise list: skip the base64 hint when something more specific
+    # (JWT, vendor key, HTTP Basic) has already matched - those are
+    # also alphanumeric+ but the base64-decoding suggestion would be
+    # actively wrong for them (an AWS key isn't base64 of anything).
+    _SPECIFIC_PREFIXES = ("JWT", "AWS", "GitHub", "Stripe", "Slack", "GitLab",
+                           "HTTP Basic", "Bcrypt", "Argon2", "crypt(3)",
+                           "MongoDB", "MD5", "SHA-")
+    if (re.fullmatch(r"[A-Za-z0-9+/_-]+=*", s) and len(s) >= 8 and len(s) % 4 == 0
+            and not any(h.label.startswith(_SPECIFIC_PREFIXES) for h in hints)):
         hints.append(FormatHint(
             "Looks like base64-encoded data",
             "use `b64d` to decode (works for standard base64 and base64url)"))
 
-    # ---- Hex bytes (only if not already classified as a specific hash) ----
-    if re.fullmatch(r"[0-9a-fA-F]+", s) and len(s) >= 8 and len(s) % 2 == 0 \
-            and not any("hash" in h.label for h in hints):
+    # ---- Hex bytes (only if not already classified as something more specific) ----
+    # Skip when we already identified the exact role - MD5/SHA hashes
+    # AND MongoDB ObjectId are all valid hex but each has a richer
+    # interpretation we'd rather lead with.
+    if (re.fullmatch(r"[0-9a-fA-F]+", s) and len(s) >= 8 and len(s) % 2 == 0
+            and not any("hash" in h.label or "ObjectId" in h.label
+                         for h in hints)):
         hints.append(FormatHint(
             "Hex-encoded bytes",
             "use `hexd` to decode to bytes / ASCII"))

