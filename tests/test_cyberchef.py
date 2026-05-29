@@ -584,6 +584,119 @@ class TestIdentifyEmpty:
         assert identify_format("   ") == []
 
 
+class TestIdentifyStructuredData:
+    def test_php_serialized(self):
+        s = 'a:2:{i:0;s:5:"hello";i:1;s:5:"world";}'
+        assert any("PHP serialized" in l for l in _labels(s))
+
+    def test_php_serialized_object(self):
+        s = 'O:8:"stdClass":1:{s:4:"name";s:5:"alice";}'
+        assert any("PHP serialized" in l for l in _labels(s))
+
+    def test_http_request_line(self):
+        for line in ("GET /admin HTTP/1.1",
+                      "POST /login HTTP/2.0",
+                      "PUT /api/users/1 HTTP/1.1"):
+            labels = _labels(line)
+            assert any("HTTP request line" in l for l in labels), \
+                f"failed for {line!r}"
+
+    def test_http_response_status_line(self):
+        for line in ("HTTP/1.1 200 OK", "HTTP/2.0 404 Not Found"):
+            labels = _labels(line)
+            assert any("HTTP response status" in l for l in labels), \
+                f"failed for {line!r}"
+
+    def test_set_cookie_header(self):
+        cookie = "session=abc123; Path=/; HttpOnly; Secure; SameSite=Strict"
+        labels = _labels(cookie)
+        assert any("Set-Cookie" in l for l in labels)
+
+    def test_set_cookie_missing_flags_flagged(self):
+        cookie = "session=abc123; Path=/"   # no HttpOnly / Secure / SameSite
+        hints = identify_format(cookie)
+        set_cookie_hints = [h for h in hints if "Set-Cookie" in h.label]
+        assert set_cookie_hints
+        # Suggestion mentions the missing flags
+        assert "HttpOnly" in set_cookie_hints[0].suggestion
+        assert "Secure" in set_cookie_hints[0].suggestion
+        assert "SameSite" in set_cookie_hints[0].suggestion
+
+    def test_cookie_header_form(self):
+        # Multiple cookies WITHOUT attribute keywords = client-side
+        # Cookie header.
+        labels = _labels("a=1; b=2; c=3")
+        assert any("Cookie header" in l for l in labels)
+
+    def test_graphql_query(self):
+        for q in ("query { user(id:1) { name } }",
+                   "mutation { createUser(name:\"x\") { id } }",
+                   "{ users { id name } }"):
+            labels = _labels(q)
+            assert any("GraphQL" in l for l in labels), f"failed for {q!r}"
+
+    def test_jwk(self):
+        jwk = '{"kty":"RSA","kid":"abc","alg":"RS256","n":"xxxx","e":"AQAB"}'
+        assert any("JWK" in l for l in _labels(jwk))
+
+    def test_yaml_document(self):
+        yaml_text = "name: alice\nage: 30\nroles:\n  - admin\n  - user\n"
+        assert any("YAML" in l for l in _labels(yaml_text))
+
+    def test_json_not_flagged_as_yaml(self):
+        # JSON shouldn't trigger the YAML detector (which would be
+        # double-flagging).
+        labels = _labels('{"name": "alice"}')
+        assert not any("YAML" in l for l in labels)
+
+    def test_xml_document(self):
+        xml = '<?xml version="1.0"?><root><user>alice</user></root>'
+        labels = _labels(xml)
+        assert any("XML" in l for l in labels)
+
+    def test_soap_envelope(self):
+        soap = '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/">'
+        assert any("XML / SOAP" in l for l in _labels(soap))
+
+    def test_ipv6_cidr(self):
+        labels = _labels("2001:db8::/64")
+        assert any("IPv6 CIDR" in l for l in labels)
+
+    def test_host_port(self):
+        labels = _labels("example.com:8080")
+        assert any("host:port" in l for l in labels)
+
+    def test_invalid_port_not_flagged(self):
+        # Port > 65535 should not be flagged.
+        labels = _labels("example.com:99999")
+        assert not any("host:port" in l for l in labels)
+
+    def test_numeric_id(self):
+        labels = _labels("42")
+        assert any("Numeric value" in l for l in labels)
+
+    def test_short_hex_8(self):
+        labels = _labels("deadbeef")
+        assert any("8 hex chars" in l for l in labels)
+        # Should NOT also flag as generic base64 / hex bytes
+        assert not any(l.startswith("Looks like base64") for l in labels)
+        assert not any(l == "Hex-encoded bytes" for l in labels)
+
+    def test_short_hex_16(self):
+        labels = _labels("deadbeefcafef00d")
+        assert any("16 hex chars" in l for l in labels)
+        assert not any(l.startswith("Looks like base64") for l in labels)
+        assert not any(l == "Hex-encoded bytes" for l in labels)
+
+    def test_md5_still_takes_precedence_over_short_hex(self):
+        # 32 hex chars should be MD5, NOT also flagged as short-hex
+        # (because of the de-noising check `"hash" in label`).
+        labels = _labels("21232f297a57a5a743894a0e4a801fc3")
+        assert any("MD5" in l for l in labels)
+        assert not any("8 hex chars" in l or "16 hex chars" in l
+                        for l in labels)
+
+
 # ---------------------------------------------------------------------
 # Additional format detectors (modern hashes, network, vendor tokens,
 # attack payloads)

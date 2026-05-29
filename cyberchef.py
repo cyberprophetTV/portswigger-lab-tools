@@ -839,6 +839,141 @@ def identify_format(text: str) -> list[FormatHint]:
         except (binascii.Error, ValueError, UnicodeDecodeError):
             pass
 
+    # ---- Structured-data shapes the BSCP exam throws at you ----
+
+    # PHP serialized data: a:N:{...}, s:N:"...", O:N:"ClassName":...
+    # Format starts with one of [aOdbiNsr]:NUMBER:... Crucial for
+    # deserialization labs - feed to phpggc.
+    if re.match(r"^(a|s|i|d|b|O|N|r):\d+:", s) and ";" in s:
+        hints.append(FormatHint(
+            "PHP serialized data (unserialize() input)",
+            "deserialization sink - generate a gadget chain with phpggc "
+            "(`phpggc Laravel/RCE5 system id -b`)"))
+
+    # HTTP request first line: "METHOD /path HTTP/x.y"
+    if re.match(r"^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|TRACE|CONNECT)\s+\S+\s+HTTP/[\d.]+\s*$",
+                 s, re.IGNORECASE):
+        hints.append(FormatHint(
+            "HTTP request line (method + path + version)",
+            "this is the first line of a raw request - save the whole request "
+            "to a file + feed to intruder.py / sqlmap -r"))
+
+    # HTTP response status line: "HTTP/x.y NNN REASON"
+    if re.match(r"^HTTP/[\d.]+\s+\d{3}\b", s):
+        hints.append(FormatHint(
+            "HTTP response status line",
+            "first line of a raw response - the rest tells you headers + body"))
+
+    # Set-Cookie response header (full form with attributes).
+    if re.search(r"=.+?;\s*(Path|Domain|Expires|Max-Age|HttpOnly|Secure|SameSite)",
+                  s, re.IGNORECASE):
+        missing = []
+        if not re.search(r"\bHttpOnly\b", s, re.IGNORECASE):
+            missing.append("HttpOnly")
+        if not re.search(r"\bSecure\b", s, re.IGNORECASE):
+            missing.append("Secure")
+        if not re.search(r"\bSameSite=", s, re.IGNORECASE):
+            missing.append("SameSite")
+        suggestion = ("inspect for tampering opportunities" if not missing
+                       else f"missing security flags: {', '.join(missing)} "
+                            "- chained-attack enabler (XSS reads cookie, CSRF, etc.)")
+        hints.append(FormatHint("Set-Cookie header value", suggestion))
+
+    # Cookie header form: "k=v; k=v; k=v" (multiple cookies in one string).
+    # Distinct from Set-Cookie because no attribute keywords appear.
+    if (s.count("=") >= 2 and "; " in s and ";" in s
+            and not re.search(r"\b(Path|Domain|HttpOnly|Secure|SameSite)\b", s, re.IGNORECASE)
+            and all(re.match(r"\s*[\w._-]+=", part) for part in s.split(";") if part.strip())):
+        hints.append(FormatHint(
+            "Cookie header value (k=v; k=v; ...)",
+            "list of cookies sent by client - inspect each value for "
+            "tampering / format identification"))
+
+    # GraphQL query / mutation / subscription
+    if re.search(r"\b(query|mutation|subscription|fragment)\b\s*\w*\s*[({]", s):
+        hints.append(FormatHint(
+            "GraphQL operation",
+            "test for introspection: POST {\"query\":\"{__schema{types{name}}}\"} "
+            "- if accepted, the whole API surface is yours"))
+    # Plain GraphQL body (just braces with field names)
+    if re.match(r"^\s*\{\s*\w+", s) and s.rstrip().endswith("}") and ":" not in s.split("\n", 1)[0]:
+        if not any("GraphQL" in h.label for h in hints):
+            hints.append(FormatHint(
+                "Possibly a GraphQL query body",
+                "look for field selectors like `{ user(id:1) { name email } }`"))
+
+    # JWK (JSON Web Key)
+    if (s.strip().startswith("{") and
+            ('"kty"' in s or '"kid"' in s or '"alg"' in s) and
+            any(k in s for k in ('"e"', '"n"', '"k"', '"x"', '"y"'))):
+        hints.append(FormatHint(
+            "JWK (JSON Web Key) - public key in JSON form",
+            "if this is the verification key for a JWT, use it for algorithm "
+            "confusion attack (RS256 -> HS256 with the key bytes as HMAC secret)"))
+
+    # YAML document (heuristic: multi-line with `key: value` pattern AND
+    # NOT a JSON object).
+    if (("\n" in s) and
+            not s.strip().startswith(("{", "[")) and
+            re.search(r"^[\w-]+:\s*\S", s, re.MULTILINE)):
+        hints.append(FormatHint(
+            "YAML document",
+            "common in config files / K8s manifests / OpenAPI specs - "
+            "grep for `password`, `secret`, `token`, `key`"))
+
+    # XML / SOAP envelope
+    if re.match(r"^\s*<\?xml\s", s) or re.search(r"<soap(?:env)?:Envelope", s, re.IGNORECASE):
+        hints.append(FormatHint(
+            "XML / SOAP envelope",
+            "candidate for XXE injection - inject <!DOCTYPE+ENTITY into the XML "
+            "if the server parses it"))
+
+    # IPv6 CIDR
+    if re.fullmatch(r"[0-9a-fA-F:]+/\d+", s) and ":" in s.split("/")[0]:
+        prefix = s.split("/")[0]
+        if all(len(chunk) <= 4 for chunk in prefix.split(":")):
+            try:
+                bits = int(s.split("/")[1])
+                if 0 <= bits <= 128:
+                    hints.append(FormatHint(
+                        "IPv6 CIDR range",
+                        "network block - useful for scope definition"))
+            except ValueError:
+                pass
+
+    # Host:port form (hostname:NNN).
+    m = re.fullmatch(r"([a-zA-Z0-9.-]+):(\d{1,5})", s)
+    if m and 1 <= int(m.group(2)) <= 65535 and "." in m.group(1):
+        hints.append(FormatHint(
+            f"host:port  ({m.group(1)}:{m.group(2)})",
+            "SSRF target candidate - especially useful for internal hostnames "
+            "(metadata, internal-api, etc.)"))
+
+    # Pure numeric ID - small heuristic for "looks like a database key"
+    if re.fullmatch(r"\d{1,12}", s) and not re.fullmatch(r"\d{10}|\d{13}", s):
+        # Exclude epoch-shaped (already handled above as Unix epoch).
+        n_digits = len(s)
+        if 1 <= n_digits <= 12:
+            hints.append(FormatHint(
+                f"Numeric value ({n_digits} digit{'s' if n_digits != 1 else ''})",
+                "if used as an object identifier, test for IDOR by incrementing/"
+                "decrementing the value"))
+
+    # Short hex blobs (8, 12, 16, 20, 24 hex chars) - probably some kind
+    # of checksum or short ID, not yet covered by the longer-hash detectors.
+    if (re.fullmatch(r"[a-fA-F0-9]{8}", s) and
+            not any("hash" in h.label or "Mongo" in h.label for h in hints)):
+        hints.append(FormatHint(
+            "8 hex chars  (CRC32 / file checksum / short ID)",
+            "8-char hex = 32 bits. CRC32 of something? A short DB ID? "
+            "Without context, guess CRC32 first."))
+    if (re.fullmatch(r"[a-fA-F0-9]{16}", s) and
+            not any("hash" in h.label or "Mongo" in h.label for h in hints)):
+        hints.append(FormatHint(
+            "16 hex chars  (could be: 64-bit ID / partial hash / short token)",
+            "non-standard hash length. If you found it in a session cookie, "
+            "try cracking small wordlists vs MD5/SHA1 truncated to 16 chars."))
+
     # ---- Generic base64 (only if not already classified above) ----
     # De-noise list: skip the base64 hint when something more specific
     # (JWT, vendor key, HTTP Basic) has already matched - those are
@@ -849,7 +984,8 @@ def identify_format(text: str) -> list[FormatHint]:
                            "MongoDB", "MD5", "SHA-",
                            "OpenAI", "Anthropic", "Google", "Twilio",
                            "SendGrid", "Mailgun", "npm", "Docker", "Discord",
-                           "PEM-armored", "PEM X.509", "PGP private")
+                           "PEM-armored", "PEM X.509", "PGP private",
+                           "8 hex chars", "16 hex chars")
     if (re.fullmatch(r"[A-Za-z0-9+/_-]+=*", s) and len(s) >= 8 and len(s) % 4 == 0
             and not any(h.label.startswith(_SPECIFIC_PREFIXES) for h in hints)):
         hints.append(FormatHint(
@@ -857,12 +993,13 @@ def identify_format(text: str) -> list[FormatHint]:
             "use `b64d` to decode (works for standard base64 and base64url)"))
 
     # ---- Hex bytes (only if not already classified as something more specific) ----
-    # Skip when we already identified the exact role - MD5/SHA hashes
-    # AND MongoDB ObjectId are all valid hex but each has a richer
-    # interpretation we'd rather lead with.
+    # Skip when we already identified the exact role - MD5/SHA hashes,
+    # MongoDB ObjectId, and short-hex (8/16 chars with their own hints)
+    # are all valid hex but each has a richer interpretation we'd
+    # rather lead with.
     if (re.fullmatch(r"[0-9a-fA-F]+", s) and len(s) >= 8 and len(s) % 2 == 0
             and not any("hash" in h.label or "ObjectId" in h.label
-                         for h in hints)):
+                         or "hex chars" in h.label for h in hints)):
         hints.append(FormatHint(
             "Hex-encoded bytes",
             "use `hexd` to decode to bytes / ASCII"))
@@ -1123,6 +1260,48 @@ def run_magic_picker(console, current: str, q_style) -> str | None:
     return annotated[idx][1]
 
 
+def _format_diagnostic(value: str) -> Text:
+    """Build a 'here's what to try next' block when identify finds nothing."""
+    body = Text()
+    body.append("No specific format recognized. ", style="warning")
+    body.append(f"({len(value)} chars)\n\n", style="muted")
+    body.append("Things to try:\n", style="primary")
+    body.append("  1. ", style="accent")
+    body.append("magic", style="accent")
+    body.append("      auto-decode: tries every decoder, shows readable results\n",
+                style="muted")
+    body.append("  2. ", style="accent")
+    body.append("b64d", style="accent")
+    body.append("      decode as base64 (most common - try first if it's "
+                "letters+digits+/+=)\n", style="muted")
+    body.append("  3. ", style="accent")
+    body.append("urld", style="accent")
+    body.append("      URL-decode (try if you see %XX sequences)\n",
+                style="muted")
+    body.append("  4. ", style="accent")
+    body.append("hexd", style="accent")
+    body.append("      hex-decode (try if it's all 0-9 and a-f)\n",
+                style="muted")
+    body.append("  5. ", style="accent")
+    body.append("list", style="accent")
+    body.append("      browse all 40 operations\n", style="muted")
+    body.append("\n")
+    # Length-based hints for things the user might not have realized.
+    if len(value) < 20:
+        body.append("Note: short strings often have no distinctive format. "
+                    "It may simply be plaintext or an opaque identifier.\n",
+                    style="muted")
+    elif len(value) > 1000:
+        body.append("Note: large blob - might be a full HTTP response / "
+                    "encoded image / serialized object. Try `b64d` first; "
+                    "if it decodes, identify the result.\n", style="muted")
+    elif all(c.isalnum() or c in "-_+/=" for c in value):
+        body.append("Note: this is high-entropy alphanumeric text - "
+                    "an opaque token, session ID, or encoded blob. "
+                    "Try `magic` first.\n", style="muted")
+    return body
+
+
 def run_identify(console: Console, current: str) -> None:
     """
     Standalone `identify` command - show what the CURRENT value looks
@@ -1130,17 +1309,21 @@ def run_identify(console: Console, current: str) -> None:
     what is it?" without committing to a decoder.
     """
     console.print()
+    if not current.strip():
+        console.print(Panel(
+            Text("The current value is empty. Use `edit` to paste in "
+                 "the value you want to identify.", style="warning"),
+            title="identify", border_style="warning", padding=(1, 2),
+        ))
+        return
+
     hints = identify_format(current)
     if not hints:
         console.print(Panel(
-            Text.assemble(
-                ("No recognized format. ", "warning"),
-                "Try ", ("magic ", "accent"),
-                "to see if any decoder produces readable output, ",
-                "or ", ("list ", "accent"),
-                "to browse all operations.",
-            ),
-            border_style="muted", padding=(1, 2),
+            _format_diagnostic(current),
+            title="identify",
+            border_style="warning",
+            padding=(1, 2),
         ))
         return
     body = Text()
