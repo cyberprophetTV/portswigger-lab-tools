@@ -319,6 +319,25 @@ TOOLS: list[Tool] = [
         ],
     ),
     Tool(
+        key="cyberchef",
+        name="CyberChef (offline TUI - encode/decode/hash/parse)",
+        script="cyberchef.py",
+        description=(
+            "TUI mini-CyberChef. Paste a value, then chain operations: "
+            "Base64 / URL / Hex / Binary encoding, MD5/SHA hashing, "
+            "JSON pretty-print, URL parsing, defang/refang for IOC "
+            "sharing, time conversions, JWT decode, magic auto-decoder. "
+            "Everything runs locally - no calls to the live CyberChef "
+            "site. Safe for tokens / cookies / credentials."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("--input", "Load initial input from a file  "
+                              "(blank to type interactively in the TUI)",
+                   default="", kind="path", required=False),
+        ],
+    ),
+    Tool(
         key="workflow",
         name="Workflow runner (multi-step + state extraction + fuzz)",
         script="workflow.py",

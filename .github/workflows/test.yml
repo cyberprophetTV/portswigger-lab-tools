@@ -44,6 +44,7 @@ jobs:
           python3 decode_tool.py --help > /dev/null
           python3 decode_tool.py url --help > /dev/null
           python3 oast_poll.py --help > /dev/null
+          python3 cyberchef.py --help > /dev/null
           python3 workflow.py --help > /dev/null
           python3 workflow.py examples/workflow-login-csrf-fuzz.json --dry-run > /dev/null
           python3 workflow.py examples/workflow-loop-paginate.json --dry-run > /dev/null
