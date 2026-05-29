@@ -547,6 +547,10 @@ def identify_format(text: str) -> list[FormatHint]:
         hints.append(FormatHint(
             "SHA-256 hash (64 hex chars)",
             "modern standard - cracking only works for short / known-pattern inputs"))
+    if re.fullmatch(r"[a-fA-F0-9]{96}", s):
+        hints.append(FormatHint(
+            "SHA-384 hash (96 hex chars)",
+            "less common than SHA-256/512 - same cracking difficulty as SHA-256"))
     if re.fullmatch(r"[a-fA-F0-9]{128}", s):
         hints.append(FormatHint(
             "SHA-512 hash (128 hex chars)",

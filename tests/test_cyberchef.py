@@ -463,9 +463,24 @@ class TestIdentifyHashes:
         labels = _labels("b" * 64)
         assert any("SHA-256" in l for l in labels)
 
+    def test_sha384(self):
+        # 96 hex chars - same length as SHA-384 hex digest.
+        labels = _labels("c" * 96)
+        assert any("SHA-384" in l for l in labels)
+
     def test_sha512(self):
-        labels = _labels("c" * 128)
+        labels = _labels("d" * 128)
         assert any("SHA-512" in l for l in labels)
+
+    def test_each_hash_distinct(self):
+        # Sanity that each hash length maps to its OWN label.
+        for length, expected in ((32, "MD5"), (40, "SHA-1"), (64, "SHA-256"),
+                                   (96, "SHA-384"), (128, "SHA-512")):
+            labels = _labels("a" * length)
+            matching = [l for l in labels if expected in l]
+            assert len(matching) == 1, \
+                f"hex string of length {length} should match exactly one hash " \
+                f"family ({expected}); got labels: {labels}"
 
     def test_hash_does_not_also_flag_hex_bytes(self):
         # A 32-hex-char string IS valid hex but we report it as MD5
@@ -695,6 +710,116 @@ class TestIdentifyStructuredData:
         assert any("MD5" in l for l in labels)
         assert not any("8 hex chars" in l or "16 hex chars" in l
                         for l in labels)
+
+
+class TestIdentifyComprehensiveSweep:
+    """
+    One realistic input per detector + verification that the expected
+    label substring fires. Caught a real coverage gap (SHA-384 was
+    documented as supported but never implemented).
+
+    If you ADD a new detector to identify_format, add a row here
+    too - it's the regression net.
+    """
+    # Each row: (display label, input string, must-contain substring
+    # in at least one returned hint's label)
+    SWEEP_CASES = [
+        # Hashes
+        ("MD5",              "21232f297a57a5a743894a0e4a801fc3", "MD5"),
+        ("SHA-1",            "a"*40,                              "SHA-1"),
+        ("SHA-256",          "b"*64,                              "SHA-256"),
+        ("SHA-384",          "c"*96,                              "SHA-384"),
+        ("SHA-512",          "d"*128,                             "SHA-512"),
+        ("Bcrypt",           "$2a$10$" + "A"*53,                  "Bcrypt"),
+        ("crypt(3)",         "$5$rounds=5000$salt$abc",           "crypt(3)"),
+        ("Argon2",           "$argon2id$v=19$m=65536$salt$hash",  "Argon2"),
+        # Tokens
+        ("JWT",              "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig", "JWT"),
+        ("JWK",              '{"kty":"RSA","kid":"a","alg":"RS256","n":"x","e":"AQAB"}', "JWK"),
+        ("Bearer header",    "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig", "Bearer"),
+        ("Basic header",     "Basic YWRtaW46cGFzc3dvcmQ=",        "Basic"),
+        ("Token header",     "Token abc123def456ghi789jkl012mno", "Token"),
+        # Vendor API keys
+        ("AWS AKIA",         "AKIAIOSFODNN7EXAMPLE",              "AWS"),
+        ("AWS ASIA",         "ASIAIOSFODNN7EXAMPLE",              "AWS"),
+        ("GitHub PAT",       "ghp_" + "A"*36,                     "GitHub"),
+        ("Stripe sk_live_",  "sk_live_" + "A"*24,                 "Stripe"),
+        ("Slack bot",        "xoxb-1-1-" + "A"*8,                 "Slack"),
+        ("GitLab PAT",       "glpat-" + "A"*20,                   "GitLab"),
+        ("OpenAI",           "sk-" + "A"*48,                      "OpenAI"),
+        ("Anthropic",        "sk-ant-" + "A"*80,                  "Anthropic"),
+        ("Google svc-acct",  '{"type": "service_account"}',       "Google"),
+        ("Google API key",   "AIza" + "A"*35,                     "Google"),
+        ("Twilio SK",        "SK" + "a"*32,                       "Twilio"),
+        ("Twilio AC",        "AC" + "f"*32,                       "Twilio"),
+        ("SendGrid",         "SG." + "A"*22 + "." + "B"*43,       "SendGrid"),
+        ("Mailgun",          "key-" + "a"*32,                     "Mailgun"),
+        ("npm token",        "npm_" + "A"*36,                     "npm"),
+        ("Docker PAT",       "dckr_pat_" + "A"*27,                "Docker"),
+        ("Discord bot",      "M" + "A"*23 + "." + "B"*6 + "." + "C"*27, "Discord"),
+        # PEM keys
+        ("RSA PRIVATE",      "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----", "RSA private key"),
+        ("EC PRIVATE",       "-----BEGIN EC PRIVATE KEY-----\nx\n-----END EC PRIVATE KEY-----", "EC private key"),
+        ("OpenSSH PRIVATE",  "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----", "OpenSSH"),
+        ("X.509 cert",       "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----", "X.509"),
+        ("PGP private",      "-----BEGIN PGP PRIVATE KEY BLOCK-----\nx\n-----END PGP PRIVATE KEY BLOCK-----", "PGP"),
+        # Network
+        ("IPv4",             "192.168.1.1",                       "IPv4"),
+        ("IPv4 CIDR",        "10.0.0.0/8",                        "CIDR"),
+        ("IPv6 ::1",         "::1",                               "IPv6"),
+        ("IPv6 full",        "2001:0db8:85a3:0000:0000:8a2e:0370:7334", "IPv6"),
+        ("IPv6 CIDR",        "2001:db8::/64",                     "IPv6 CIDR"),
+        ("MAC",              "aa:bb:cc:dd:ee:ff",                 "MAC"),
+        ("host:port",        "metadata.internal:8080",            "host:port"),
+        # IDs / time
+        ("UUID v4",          "01234567-89ab-4cde-9fff-fedcba987654", "UUID v4"),
+        ("MongoDB OID",      "507f1f77bcf86cd799439011",          "MongoDB"),
+        ("Epoch sec",        "1700000000",                         "epoch seconds"),
+        ("Epoch ms",         "1700000000000",                      "milliseconds"),
+        ("ISO 8601",         "2026-05-29T14:23:01Z",              "ISO 8601"),
+        ("Numeric ID",       "42",                                 "Numeric"),
+        # Web data
+        ("Email",            "user@example.com",                  "Email"),
+        ("URL",              "https://example.com/path",          "URL"),
+        ("JSON",             '{"a":1}',                            "JSON"),
+        ("HTML",             "<!DOCTYPE html><html></html>",      "HTML"),
+        ("Query string",     "a=1&b=2&c=3",                       "query string"),
+        # Cookie shapes
+        ("user:MD5",         "wiener:51dc30ddc473d433366176fa25a71b14", "username:MD5"),
+        ("user:SHA1",        "wiener:" + "a"*40,                  "username:SHA1"),
+        ("pipe cookie",      "admin|2026-06-01",                  "pipe-separated"),
+        # Attack payloads
+        ("Path traversal",   "../../../etc/passwd",               "Path traversal"),
+        ("SQL injection",    "' UNION SELECT NULL--",             "SQL injection"),
+        ("XSS",              "<script>alert(1)</script>",         "XSS"),
+        ("SSTI",             "{{7*7}}",                            "Template injection"),
+        ("JNDI",             "${jndi:ldap://x/y}",                "JNDI"),
+        # Structured
+        ("PHP serialized",   'a:1:{i:0;s:1:"x";}',                "PHP serialized"),
+        ("HTTP req line",    "GET /admin HTTP/1.1",               "HTTP request line"),
+        ("HTTP resp status", "HTTP/1.1 200 OK",                   "HTTP response"),
+        ("Set-Cookie",       "session=x; Path=/; HttpOnly",       "Set-Cookie"),
+        ("Cookie hdr form",  "a=1; b=2",                          "Cookie header"),
+        ("GraphQL",          "query { user { name } }",           "GraphQL"),
+        ("YAML",             "name: alice\nrole: admin",          "YAML"),
+        ("SOAP",             '<soap:Envelope xmlns:soap="x"/>',   "SOAP"),
+        # Generic / fallback
+        ("HTTP Basic value", "YWRtaW46cGFzc3dvcmQ=",              "HTTP Basic"),
+        ("Hex 8 chars",      "deadbeef",                          "8 hex chars"),
+        ("Hex 16 chars",     "deadbeefcafef00d",                  "16 hex chars"),
+        ("Opaque token",     "aBcD1234efGh5678ijKlMnOp90123",     "opaque token"),
+    ]
+
+    @pytest.mark.parametrize("display,inp,expect", SWEEP_CASES,
+                              ids=lambda v: v if isinstance(v, str) else None)
+    def test_detector_fires(self, display, inp, expect):
+        from cyberchef import identify_format
+        hints = identify_format(inp)
+        matches = [h.label for h in hints if expect.lower() in h.label.lower()]
+        assert matches, (
+            f"{display}: expected label containing {expect!r}; "
+            f"got: {[h.label for h in hints]!r}"
+        )
 
 
 class TestIdentifyAuthPrefixes:
