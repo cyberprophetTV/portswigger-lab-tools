@@ -4,6 +4,41 @@ Small Python tools for solving PortSwigger [Web Security Academy](https://portsw
 
 **See [docs/walkthrough.md](docs/walkthrough.md) for an end-to-end annotated example** of solving the canonical username-enumeration lab with these tools.
 
+## Designed for AI / LLM orchestration
+
+`intruder.py` has a `--json` mode that emits NDJSON (one JSON object per line) instead of human-readable output. Combined with `--include-body --truncate-body N`, you get a structured stream that's small enough to feed to an LLM:
+
+```bash
+python3 intruder.py req.txt --payload sqli.txt \
+    --json --include-body --truncate-body 2000 \
+    | your-llm-orchestrator.py
+```
+
+The response body is run through a noise stripper (scripts, styles, SVG, iframes, comments removed; whitespace collapsed) so a 200 KB React-hydrated page typically compacts to 2–5 KB while preserving forms, inputs, links, and visible text — exactly what an LLM needs to reason about attack surface.
+
+All status / banner / summary lines route to **stderr** in `--json` mode so stdout stays a clean parseable stream.
+
+## Time-based blind detection
+
+```bash
+python3 intruder.py req.txt --payload time-sqli-payloads.txt \
+    --baseline-samples 5 --match-time-delta 4
+```
+
+- `--baseline-samples 5` sends 5 requests at startup with markers blanked out to measure the server's normal response time
+- `--match-time-delta 4` flags any response ≥ 4 seconds slower than that baseline
+- Designed for payloads like `' OR SLEEP(5)--` that produce identical response bodies but a measurable delay
+
+## Session revivification
+
+```bash
+python3 intruder.py req.txt --payload usernames.txt \
+    --login-url https://target/login --login-data 'user=admin&pw=secret' \
+    --reauth-on-block
+```
+
+If the server returns `401`, `403`, or `302 -> /login` mid-fuzz, the script automatically re-runs the login flow and retries the request. Lock-serialized across workers so concurrent failures don't stampede the login endpoint.
+
 ## BSCP-style rate limit safety
 
 The exam (and most real-world labs) will IP-ban you if you fuzz too aggressively. `intruder.py` has two layers of rate-limit defense:

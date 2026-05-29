@@ -17,6 +17,7 @@ from intruder import (
     apply_encoding, parse_encode_chain, ENCODERS,
     write_json, write_csv, write_html, write_markdown,
     parse_form_data, parse_cookie_pair, load_cookie_jar, save_cookie_jar,
+    looks_logged_out,
 )
 
 
@@ -514,6 +515,37 @@ class TestParseCookiePair:
     def test_missing_equals_exits(self):
         with pytest.raises(SystemExit):
             parse_cookie_pair("just_a_name")
+
+
+class TestLooksLoggedOut:
+    def test_401_unauthorized(self):
+        assert looks_logged_out(401)
+
+    def test_403_forbidden(self):
+        assert looks_logged_out(403)
+
+    def test_200_is_not_logged_out(self):
+        assert not looks_logged_out(200)
+        assert not looks_logged_out(200, "/somewhere/else")
+
+    def test_302_to_login_caught(self):
+        assert looks_logged_out(302, "/login")
+        assert looks_logged_out(302, "https://x/login?next=/")
+        assert looks_logged_out(302, "/auth/signin")
+        assert looks_logged_out(302, "/SIGNIN")     # case insensitive
+
+    def test_302_to_other_not_caught(self):
+        assert not looks_logged_out(302, "/my-account")
+        assert not looks_logged_out(302, "/")
+        assert not looks_logged_out(302, "/dashboard")
+
+    def test_302_with_empty_location_not_caught(self):
+        assert not looks_logged_out(302, "")
+
+    def test_other_3xx_status_codes(self):
+        for code in (303, 307, 308):
+            assert looks_logged_out(code, "/login")
+            assert not looks_logged_out(code, "/other")
 
 
 class TestCookieJar:

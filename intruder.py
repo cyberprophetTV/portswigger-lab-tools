@@ -172,6 +172,7 @@ import json                                  # --output file format
 import random                                # jitter
 import re                                    # marker + matcher regexes
 import sys                                   # sys.exit on errors
+import threading                             # Lock used to serialize re-auth (--reauth-on-block)
 import time                                  # time.sleep + time.monotonic
 import urllib.parse                          # for --encode url
 from concurrent.futures import (             # parallel request execution
@@ -966,6 +967,30 @@ def send(session: requests.Session, raw_req: RawRequest,
     return r, elapsed
 
 
+def looks_logged_out(status: int | None, location: str = "") -> bool:
+    """
+    Heuristic: does this response look like our session has been killed?
+
+    True when:
+      - status is 401 (Unauthorized) or 403 (Forbidden) - the server
+        is explicitly rejecting us
+      - status is 3xx with a Location header pointing at a login page
+        (path contains "/login", "/signin", or "/auth")
+
+    False positives ARE possible (e.g. a normal 403 on a protected
+    endpoint we shouldn't be hitting). But session revivification
+    only triggers an extra login POST, which is recoverable - so
+    biased toward detection.
+    """
+    if status in (401, 403):
+        return True
+    if status in (302, 303, 307, 308):
+        loc = location.lower()
+        if "/login" in loc or "/signin" in loc or "/auth" in loc:
+            return True
+    return False
+
+
 def dump_request(raw_req: RawRequest, host: str, scheme: str) -> None:
     """Pretty-print a substituted request for --verbose mode."""
     print(f"    {raw_req.method} {scheme}://{host}{raw_req.path}")
@@ -1036,6 +1061,15 @@ class FuzzConfig:
     # OS command injection.
     baseline_samples: int = 0
     match_time_delta: float = 0.0
+    # ---- Session revivification ----
+    # When True AND login_url is set, the worker detects logged-out
+    # responses (401 / 403 / 302-to-/login) and automatically re-runs
+    # the login flow, then retries the request once. Tracks how many
+    # times this happens so you see if the server is repeatedly
+    # killing your session under aggressive fuzzing.
+    reauth_on_block: bool = False
+    login_url: str | None = None
+    login_data: dict[str, str] = field(default_factory=dict)
 
 
 # =====================================================================
@@ -1113,6 +1147,46 @@ def fuzz(cfg: FuzzConfig) -> None:
     # ---- Rate limiter (proactive cap + reactive 429 backoff) ----
     rate_limiter = RateLimiter(max_rps=cfg.max_rps)
 
+    # ---- Session revivification state ----
+    # `reauth_lock` serializes the actual login POST so concurrent
+    # workers that all detect logged-out at the same time don't all
+    # try to re-login simultaneously (thundering herd against the
+    # login endpoint). `reauth_count` is just a stat.
+    reauth_lock = threading.Lock()
+    reauth_count = [0]
+    # monotonic time of the last successful re-auth. Workers that
+    # got logged-out BEFORE this time should skip their own re-auth
+    # and just retry - someone else already refreshed the session.
+    last_reauth_at = [0.0]
+
+    def maybe_reauth(session, my_request_started_at: float) -> bool:
+        """
+        Run a re-login if cfg.reauth_on_block is on AND nobody else
+        re-authed since this worker's send.
+
+        Returns True if cookies have been refreshed (caller should
+        retry the request), False if reauth is disabled / no login
+        URL available.
+        """
+        if not cfg.reauth_on_block or not cfg.login_url:
+            return False
+        with reauth_lock:
+            if last_reauth_at[0] > my_request_started_at:
+                # Someone re-authed AFTER we sent. Our request hit
+                # the old session. Tell caller to retry with the
+                # already-fresh cookies.
+                return True
+            # We're the lucky thread that gets to actually re-auth.
+            new_cookies = login_and_capture(session, cfg.login_url, cfg.login_data)
+            # `login_and_capture` updates session.cookies in place.
+            # For --fresh-session mode we'd ALSO need to update
+            # cfg.cookies; skipping that for now (documented as a
+            # known limitation - --reauth-on-block + --fresh-session
+            # is an unusual combination).
+            reauth_count[0] += 1
+            last_reauth_at[0] = time.monotonic()
+            return True
+
     # ---- Baseline timing (for time-based blind detection) ----
     # Send a few requests with markers blanked out so we know the
     # server's "normal" response time. Time-based SQLi like
@@ -1178,10 +1252,22 @@ def fuzz(cfg: FuzzConfig) -> None:
             req = RawRequest(method=req.method, path=req.path,
                              headers=new_headers, body=req.body)
 
+        request_started_at = time.monotonic()
         try:
             r, elapsed = send(sess, req, host, scheme)
-            # Inform the rate limiter so it can start backing off on 429s.
             rate_limiter.report_response(r.status_code)
+
+            # Session revivification: if the response looks like our
+            # session got killed, try once to re-login + retry the
+            # request. Only one retry - no infinite loop.
+            location = r.headers.get("Location", "")
+            if looks_logged_out(r.status_code, location):
+                if maybe_reauth(sess, request_started_at):
+                    # Cookies refreshed (either by us or another
+                    # worker since we sent). Retry the request once.
+                    r, elapsed = send(sess, req, host, scheme)
+                    rate_limiter.report_response(r.status_code)
+
             return label, req, payloads, r.status_code, len(r.content), r.text, elapsed, None, oob_id
         except requests.exceptions.RequestException as e:
             # Connection errors, DNS failures, timeouts, etc.
@@ -1304,6 +1390,12 @@ def fuzz(cfg: FuzzConfig) -> None:
     if rl_stats["total_blocks_seen"] > 0:
         _log(f"{tag_warn()} rate limiter: {rl_stats['total_blocks_seen']} 429 response(s), "
              f"{rl_stats['total_backoffs_triggered']} backoff(s) triggered")
+
+    # ---- session-revivification summary ----
+    if reauth_count[0] > 0:
+        _log(f"{tag_warn()} session re-authed {reauth_count[0]} time(s) "
+             "(server kept killing the session - consider --jitter and/or "
+             "--max-rps to be less aggressive)")
 
 
 # =====================================================================
@@ -1454,6 +1546,14 @@ def main():
              "the login flow (if --login-url is set) so subsequent runs "
              "skip the login.",
     )
+    ap.add_argument(
+        "--reauth-on-block", action="store_true",
+        help="If a request returns 401 / 403 / 302-to-/login (looks like "
+             "our session got killed), automatically re-run the --login-url "
+             "flow and retry the request once. Requires --login-url + "
+             "--login-data. Lock-serialized so concurrent workers don't "
+             "stampede the login endpoint.",
+    )
     args = ap.parse_args()
 
     # ---- Build the matcher from the four match-* args ----
@@ -1549,7 +1649,13 @@ def main():
         truncate_body=args.truncate_body,
         baseline_samples=args.baseline_samples,
         match_time_delta=args.match_time_delta,
+        reauth_on_block=args.reauth_on_block,
+        login_url=args.login_url,
+        login_data=parse_form_data(args.login_data) if args.login_data else {},
     )
+
+    if args.reauth_on_block and not args.login_url:
+        sys.exit(f"{tag_err()} --reauth-on-block requires --login-url + --login-data")
 
     fuzz(cfg)
 
