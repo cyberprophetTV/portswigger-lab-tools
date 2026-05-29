@@ -1,0 +1,27 @@
+{
+  "_doc": "Real workflow showing how to compose multiple macros. Step 1 invokes macro-warmup (which itself invokes macro-login + macro-refresh-csrf). Step 2 does the actual attack with all the captured state already in place. Compare to writing the same chain inline - this version is shorter, more readable, and shares macros across workflows so the login flow only has to be maintained ONCE.",
+
+  "vars": {
+    "base_url": "https://YOUR-LAB.web-security-academy.net",
+    "user": "wiener",
+    "pass": "peter"
+  },
+
+  "steps": [
+    {
+      "name": "warmup_session_with_macros",
+      "include": "macro-warmup.json"
+    },
+
+    {
+      "name": "actual_attack_step",
+      "if": "{{csrf}}",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/my-account/change-email",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "csrf={{csrf}}&email=attacker@evil.example"
+      }
+    }
+  ]
+}

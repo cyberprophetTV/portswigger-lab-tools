@@ -142,6 +142,34 @@ ngrok's free tier now requires signup + auth-token configuration, and tunnels di
 
 ---
 
+## Reusable macros (deterministic replays)
+
+Burp Pro lets you record a "macro" — a sequence of requests it replays before specific requests, used for session handling. `workflow.py` ships an equivalent pattern using `include`: define a workflow file once, include it from many places. Macros let you write the login flow ONCE and reuse it across every workflow that needs an authenticated session.
+
+Three shipped macros you can compose:
+
+| File | What it does | Required vars |
+|---|---|---|
+| [`examples/macro-login.json`](../examples/macro-login.json) | POST credentials, capture session cookie | `base_url`, `user`, `pass` |
+| [`examples/macro-refresh-csrf.json`](../examples/macro-refresh-csrf.json) | GET `/my-account`, extract `csrf` from the form HTML | `base_url` (after login) |
+| [`examples/macro-warmup.json`](../examples/macro-warmup.json) | Composes the above two PLUS an initial GET to settle stateful cookies — full "ready to attack" preamble | `base_url`, `user`, `pass` |
+
+Use them by `include`-ing from a step in your real workflow:
+
+```json
+{
+  "vars": {"base_url": "...", "user": "wiener", "pass": "peter"},
+  "steps": [
+    {"name": "warmup", "include": "macro-warmup.json"},
+    {"name": "attack", "request": {"body": "csrf={{csrf}}&..."}}
+  ]
+}
+```
+
+See [`examples/workflow-using-macros.json`](../examples/workflow-using-macros.json) for the full pattern. The macros propagate captured state (cookies, `{{csrf}}`) back into the caller's `state.vars`, so the attack step can reference `{{csrf}}` directly.
+
+Macros are just workflows. Add your own by naming them `macro-*.json` and including them — convention only, the runner doesn't care about the filename.
+
 ## Eight exam pitfalls that get most people stuck
 
 These mirror what experienced BSCP takers warn about. Each maps to a specific tool in this repo.

@@ -1,0 +1,16 @@
+{
+  "_doc": "Reusable CSRF-REFRESH macro. Fetches /my-account and extracts a fresh CSRF token into {{csrf}}. Include this BEFORE any state-changing POST in your workflow. For loop-based fuzzing, put this directly in the loop's `refresh:` block instead (see workflow-csrf-refresh-loop.json). Caller supplies: {{base_url}} (and an active session via include order).",
+
+  "steps": [
+    {
+      "name": "_macro_fetch_csrf",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/my-account"
+      },
+      "extract": {
+        "csrf": {"regex": "name=\"csrf\" value=\"([^\"]+)\""}
+      }
+    }
+  ]
+}

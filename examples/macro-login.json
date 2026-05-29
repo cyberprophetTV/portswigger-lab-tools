@@ -1,0 +1,15 @@
+{
+  "_doc": "Reusable LOGIN macro. Designed to be `include`d at the top of any workflow that needs an authenticated session. Caller supplies vars: {{base_url}}, {{user}}, {{pass}}. After this macro runs, the parent workflow has a logged-in shared Session (cookies propagated automatically) ready to use.",
+
+  "steps": [
+    {
+      "name": "_macro_login_post",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/login",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "username={{user}}&password={{pass}}"
+      }
+    }
+  ]
+}

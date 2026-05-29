@@ -1,0 +1,22 @@
+{
+  "_doc": "Reusable FULL-WARMUP macro. Performs the canonical 'get me to a state where I can attack' chain: login, fetch CSRF, optionally fetch a stateful page that sets additional cookies. Composes macro-login + macro-refresh-csrf via nested includes. After this macro: session active + {{csrf}} fresh + warmed-up cookie jar. Caller supplies: {{base_url}}, {{user}}, {{pass}}.",
+
+  "steps": [
+    {
+      "name": "_warmup_login",
+      "include": "macro-login.json"
+    },
+    {
+      "name": "_warmup_csrf",
+      "include": "macro-refresh-csrf.json"
+    },
+    {
+      "name": "_warmup_initial_get",
+      "_comment": "Some apps don't fully establish a session until you GET an authenticated page once. Belt-and-suspenders.",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/"
+      }
+    }
+  ]
+}
