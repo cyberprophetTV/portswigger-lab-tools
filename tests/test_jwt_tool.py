@@ -107,35 +107,47 @@ class TestHs256Sign:
 # alg=none forgery (cmd_none output)
 # ---------------------------------------------------------------------
 class TestAlgNone:
-    def test_produces_three_variants(self, reference_token, capsys):
+    def test_produces_all_five_casing_variants(self, reference_token, capsys):
         cmd_none(reference_token, {})
-        captured = capsys.readouterr().out
-        # All three casings tried
-        assert "alg=none:" in captured
-        assert "alg=None:" in captured
-        assert "alg=NONE:" in captured
+        out = capsys.readouterr().out
+        # Every casing the user's BSCP notes called out.
+        for variant in ("'none'", "'None'", "'NONE'", "'nOnE'", "'NoNe'"):
+            assert variant in out, f"missing casing variant {variant}"
 
-    def test_payload_modification(self, reference_token, capsys):
+    def test_includes_alg_key_removed_variant(self, reference_token, capsys):
+        # Some parsers default-to-none when no `alg` key is present.
+        cmd_none(reference_token, {})
+        out = capsys.readouterr().out
+        assert "alg key absent" in out
+
+    def test_includes_signature_stripped_variant(self, reference_token, capsys):
+        cmd_none(reference_token, {})
+        out = capsys.readouterr().out
+        # The non-standard "header.payload" with no trailing dot.
+        assert "stripped" in out
+
+    def test_payload_modification_applies_to_every_variant(self, reference_token, capsys):
         cmd_none(reference_token, {"role": "admin"})
-        captured = capsys.readouterr().out
-        # Find a token line, decode it, verify role was changed.
-        for line in captured.splitlines():
-            if ".eyJ" in line:    # crude: lines containing a JWT
-                # extract last word
-                token = line.split()[-1]
-                _, payload, _, _, _, _ = parse_token(token)
-                assert payload["role"] == "admin"
-                return
-        pytest.fail("no forged token found in output")
+        out = capsys.readouterr().out
+        # Every emitted token should reflect the role override.
+        token_lines = [l for l in out.splitlines() if ".eyJ" in l]
+        assert len(token_lines) >= 7   # 5 casings + alg-removed + 2 stripped
+        for line in token_lines:
+            token = line.strip().split()[-1]
+            # Need a sentinel - the alg=none tokens end with '.'; the
+            # stripped variants don't. Both flavors decode the same way.
+            _, payload, _, _, _, _ = parse_token(
+                token if token.endswith(".") else token + ".")
+            assert payload["role"] == "admin"
 
-    def test_empty_signature(self, reference_token, capsys):
+    def test_casing_variants_have_trailing_dot(self, reference_token, capsys):
         cmd_none(reference_token, {})
-        captured = capsys.readouterr().out
-        # alg=none tokens end with a trailing dot (empty sig segment).
-        for line in captured.splitlines():
-            if "alg=" in line and ".eyJ" in line:
-                token = line.split()[-1]
-                assert token.endswith(".")
+        out = capsys.readouterr().out
+        # alg=<casing> variants must end with '.' (canonical alg=none)
+        for line in out.splitlines():
+            if "alg='" in line and ".eyJ" in line:
+                token = line.strip().split()[-1]
+                assert token.endswith("."), f"missing trailing dot in: {line!r}"
 
 
 # ---------------------------------------------------------------------

@@ -93,3 +93,62 @@ allow
 disable_auth
 skip_auth
 no_auth
+# Output-format forcers (often expose data the UI hides)
+json
+xml
+format
+type
+output
+fmt
+content_type
+# Prototype pollution / type confusion (JavaScript backends)
+__proto__
+constructor
+prototype
+# HTTP method override (CSRF / state-changing bypasses)
+_method
+_HttpMethod
+X-HTTP-Method-Override
+# CSRF / verification bypass
+_csrf
+csrf_token
+skip_csrf
+no_csrf
+# SSRF / open-redirect entry points
+next
+redirect
+redirect_to
+redirect_uri
+url
+target
+dest
+goto
+return
+return_to
+returnurl
+continue
+callback
+cb
+# Template injection / file inclusion
+template
+include
+import
+require
+file
+# Multi-step / validation bypass
+dry_run
+dryRun
+confirm
+confirmed
+preview_only
+skip_validation
+# Mass-assignment ID overrides (the IDOR classic)
+user_id
+userId
+owner_id
+ownerId
+created_by
+account_id
+# JSONP / callback abuse
+jsonp
+function

@@ -142,6 +142,76 @@ ngrok's free tier now requires signup + auth-token configuration, and tunnels di
 
 ---
 
+## Three exam pitfalls that get most people stuck
+
+These mirror what experienced BSCP takers warn about. Each maps to a specific tool in this repo.
+
+### 1. App-to-App bridge (the "two-app twist")
+
+> *You're given two seemingly-isolated lab URLs. The exploit path requires using App A's vulnerability (often Blind SSRF) to attack App B's internal endpoints.*
+
+If you treat them as separate puzzles you get permanently stuck on Stage 3. The right move:
+
+1. Find a Blind SSRF entry in App A (`/admin/import-stock?stockApi=...` style is common).
+2. **Confirm the SSRF is real** with `intruder.py --oob-host` or a hand-crafted probe to your OAST host. A hit on your collaborator proves App A's backend made the request.
+3. Pivot the SSRF target to App B's URL or an internal address.
+
+See [`examples/workflow-cross-app-ssrf.json`](../examples/workflow-cross-app-ssrf.json) for the full chain: log in → OAST confirm → pivot to App B → loop a small internal-IP sweep. Edit `app_a`, `app_b`, and `oob_host` at the top.
+
+### 2. Ghost parameters (Mass Assignment / Parameter Pollution)
+
+> *Pages that look "locked down" often accept hidden backend parameters the frontend never sends. If you're stuck on an endpoint for >10 min, fuzz it.*
+
+This is exactly what `param_miner.py` does. The bundled `hidden-params.txt` now includes 130+ candidates across categories:
+
+| Category | Examples |
+|---|---|
+| Role/privilege escalation | `admin`, `isAdmin`, `role`, `is_admin`, `sudo`, `god_mode` |
+| Output-format forcers | `json`, `xml`, `format`, `output`, `fmt` |
+| Prototype pollution (JS backends) | `__proto__`, `constructor`, `prototype` |
+| HTTP method overrides | `_method`, `X-HTTP-Method-Override` |
+| CSRF/verification bypass | `_csrf`, `skip_csrf`, `disable_auth`, `skip_auth` |
+| SSRF / open-redirect entry | `next`, `redirect`, `url`, `target`, `dest`, `goto`, `callback` |
+| Template/file inclusion | `template`, `include`, `import`, `file` |
+| Multi-step bypass | `dry_run`, `confirm`, `skip_validation` |
+| Mass-assignment IDs | `user_id`, `owner_id`, `created_by` |
+
+```bash
+python3 param_miner.py req.txt --params hidden-params.txt --cookie-jar admin.json
+```
+
+Any response whose status or length diverges from baseline is a candidate — *finding even one ghost parameter can bypass an entire auth wall*.
+
+### 3. JWT `none` — try every variant
+
+> *Everyone tries `"alg":"none"`. The server filters that one specifically. Try casing variants AND signature-stripping variants — don't give up after one rejection.*
+
+`jwt_tool.py none` now emits all seven variants automatically:
+
+```bash
+python3 jwt_tool.py none '<TOKEN>' --set role=admin --set sub=admin
+```
+
+```
+[*] alg-value casings (most servers filter only "none"):
+  [+] alg='none' :  eyJ...eyJ.
+  [+] alg='None' :  eyJ...eyJ.
+  [+] alg='NONE' :  eyJ...eyJ.
+  [+] alg='nOnE' :  eyJ...eyJ.
+  [+] alg='NoNe' :  eyJ...eyJ.
+
+[*] alg key REMOVED (default-to-none parsers):
+  [+] (alg key absent):  eyJ...eyJ.
+
+[*] signature segment STRIPPED (no trailing dot):
+  [+] (stripped, alg=none):  eyJ...eyJ
+  [+] (stripped, alg removed):  eyJ...eyJ
+```
+
+Submit each, in order, in Repeater. The five casings beat anything case-insensitive; the alg-key-removed handles parsers that default-to-none; the stripped variants handle non-standard parsers that split on `.` and never validate `parts[2]` exists.
+
+---
+
 ## Stage-by-stage usage map (BSCP)
 
 | Stage | Likely tools needed |

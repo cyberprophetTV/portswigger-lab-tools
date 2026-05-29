@@ -349,8 +349,17 @@ def build_session(
 
 
 def read_wordlist(path: Path) -> list[str]:
-    """One entry per line; strip whitespace; drop blank lines."""
-    return [w for w in (line.strip() for line in path.read_text().splitlines()) if w]
+    """
+    One entry per line; strip whitespace; drop blank lines AND lines
+    that start with `#` (after optional leading whitespace).
+
+    The `#` comment convention lets wordlist files be self-documenting
+    (section headers, sourcing notes, why-this-payload reminders).
+    Standard PortSwigger / SecLists wordlists don't use `#`, so this
+    just adds a capability rather than changing behavior on them.
+    """
+    return [w for w in (line.strip() for line in path.read_text().splitlines())
+            if w and not w.startswith("#")]
 
 
 # ---------------------------------------------------------------------
