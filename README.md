@@ -189,6 +189,16 @@ python3 -c "import re,urllib.request as u; \
 
 (Same URL with `auth-lab-passwords` for passwords.)
 
+## Example request templates
+
+The [`examples/`](examples/) directory contains starter templates for `intruder.py`:
+
+- [`examples/login.txt`](examples/login.txt) — single-marker sniper template for username enumeration
+- [`examples/login-cluster-bomb.txt`](examples/login-cluster-bomb.txt) — two markers for cluster-bomb (full credential brute-force)
+- [`examples/header-injection.txt`](examples/header-injection.txt) — header-value fuzzing template (e.g. `X-Forwarded-For` for IP-allowlist bypass)
+
+Lines starting with `#` in the template file are treated as comments and stripped by the parser — use them to leave notes for yourself. Replace `YOUR-LAB-ID` in the `Host` header with your lab's actual subdomain before running.
+
 ## Requirements
 
 - Python 3.10+

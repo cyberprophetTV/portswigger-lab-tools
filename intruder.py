@@ -383,6 +383,14 @@ class RawRequest:
             head, body = text, ""
 
         lines = head.split("\r\n")
+
+        # Strip whole-line comments from the head section. `#` at start
+        # of a line (optionally after whitespace) marks a comment. This
+        # is NOT an HTTP feature - it's a convenience for our template
+        # files so they can be self-documenting. The body is left alone
+        # (a `#` is a valid character in form data, JSON, etc.).
+        lines = [l for l in lines if not l.lstrip().startswith("#")]
+
         if not lines:
             sys.exit("[!] empty request template")
 

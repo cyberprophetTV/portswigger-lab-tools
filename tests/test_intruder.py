@@ -73,6 +73,38 @@ class TestRawRequestParse:
         r = RawRequest.parse("GET / HTTP/1.1\r\nFoo: bar\r\n\r\n")
         assert r.host() is None
 
+    def test_strips_preamble_comments(self):
+        # Comments before the request line should be ignored so
+        # example templates can be self-documenting.
+        text = (
+            "# This is a comment explaining the template\n"
+            "# Edit the Host header below\n"
+            "POST /login HTTP/1.1\nHost: x\n\nbody"
+        )
+        r = RawRequest.parse(text)
+        assert r.method == "POST"
+        assert r.path == "/login"
+        assert r.host() == "x"
+        assert r.body == "body"
+
+    def test_strips_interspersed_comments(self):
+        text = (
+            "GET / HTTP/1.1\n"
+            "# header comment\n"
+            "Host: x.com\n"
+            "# another\n"
+            "Foo: bar\n\n"
+        )
+        r = RawRequest.parse(text)
+        assert r.headers == [("Host", "x.com"), ("Foo", "bar")]
+
+    def test_does_not_strip_hash_in_body(self):
+        # `#` inside a body line (e.g. as part of form data or JSON)
+        # must NOT be stripped.
+        text = "POST / HTTP/1.1\nHost: x\n\n#tag=foo&other=bar"
+        r = RawRequest.parse(text)
+        assert r.body == "#tag=foo&other=bar"
+
 
 # ---------------------------------------------------------------------
 # RawRequest substitution

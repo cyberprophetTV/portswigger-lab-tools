@@ -1,0 +1,16 @@
+# Sniper-mode username enumeration template.
+#
+# 1. Replace YOUR-LAB-ID below with your lab's actual subdomain
+#    (the part before .web-security-academy.net).
+# 2. Run:
+#      python3 intruder.py examples/login.txt \
+#          --payload usernames.txt \
+#          --match-length '!3168'
+#
+# (Lines starting with `#` are treated as comments and ignored by
+# the parser - they only exist for your benefit.)
+POST /login HTTP/1.1
+Host: YOUR-LAB-ID.web-security-academy.net
+Content-Type: application/x-www-form-urlencoded
+
+username=§USER§&password=junk

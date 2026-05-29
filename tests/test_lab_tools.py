@@ -15,7 +15,7 @@ pytest.importorskip("rich")
 pytest.importorskip("questionary")
 
 import lab_tools
-from lab_tools import TOOLS, THEMES, Tool, Prompt, build_command
+from lab_tools import TOOLS, THEMES, Tool, Prompt, build_command, check_paths
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -143,6 +143,55 @@ class TestBuildCommand:
 # `primary` that only resolve via a Theme. Render-time crash on first
 # launch. These tests render the banner under every theme to catch
 # any such style mismatch before it ships.
+class TestCheckPaths:
+    def test_empty_when_all_paths_exist(self, tmp_path):
+        f = tmp_path / "exists.txt"
+        f.write_text("x")
+        tool = Tool(
+            key="t", name="t", script="s.py", description="x" * 30, lab_url=None,
+            prompts=[Prompt("file", "?", kind="path")],
+        )
+        assert check_paths(tool, {"file": str(f)}) == []
+
+    def test_returns_missing(self, tmp_path):
+        tool = Tool(
+            key="t", name="t", script="s.py", description="x" * 30, lab_url=None,
+            prompts=[Prompt("file", "?", kind="path")],
+        )
+        bad = str(tmp_path / "does-not-exist.txt")
+        missing = check_paths(tool, {"file": bad})
+        assert len(missing) == 1
+        assert missing[0][0].arg == "file"
+
+    def test_ignores_non_path_prompts(self):
+        # A text-kind prompt with a value that doesn't look like a real
+        # file shouldn't trigger a missing-file error.
+        tool = Tool(
+            key="t", name="t", script="s.py", description="x" * 30, lab_url=None,
+            prompts=[Prompt("base_url", "?", kind="text")],
+        )
+        assert check_paths(tool, {"base_url": "https://example.com"}) == []
+
+    def test_skipped_path_prompts_not_checked(self, tmp_path):
+        # If the user left an optional path prompt blank, we shouldn't
+        # claim a missing file for it.
+        tool = Tool(
+            key="t", name="t", script="s.py", description="x" * 30, lab_url=None,
+            prompts=[Prompt("file", "?", kind="path", required=False)],
+        )
+        assert check_paths(tool, {}) == []
+
+    def test_every_intruder_example_exists(self):
+        # Sanity check that the bundled examples are all really there
+        # (catches "I added a Prompt default but forgot to commit the
+        # example file" mistakes).
+        intruder = next(t for t in TOOLS if t.key == "intruder")
+        for p in intruder.prompts:
+            if p.kind == "path" and p.default:
+                path = Path(__file__).parent.parent / p.default
+                assert path.exists(), f"missing default file: {p.default}"
+
+
 class TestBannerRender:
     @pytest.mark.parametrize("theme_name", list(THEMES.keys()))
     def test_show_banner_does_not_crash(self, theme_name):
