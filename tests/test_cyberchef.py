@@ -14,6 +14,7 @@ pytest.importorskip("questionary")
 from cyberchef import (
     OPERATIONS, magic_decode, _looks_readable, show_state,
     ALIASES, resolve_op_name, CONTROL_COMMANDS, _prompt_choices,
+    identify_format, FormatHint,
     op_to_base64, op_from_base64,
     op_to_base32, op_from_base32,
     op_to_url, op_from_url, op_to_double_url, op_from_double_url,
@@ -434,6 +435,150 @@ class TestControlCommands:
 
     def test_includes_all_documented_commands(self):
         # Every command surfaced in the banner / help cheat sheet.
-        for cmd in ("magic", "edit", "undo", "reset", "save",
+        for cmd in ("magic", "identify", "id", "what",
+                     "edit", "undo", "reset", "save",
                      "help", "list"):
             assert cmd in CONTROL_COMMANDS
+
+
+# ---------------------------------------------------------------------
+# FORMAT IDENTIFICATION
+# ---------------------------------------------------------------------
+def _labels(text: str) -> list[str]:
+    """Helper: just the labels of identify_format(text) for easier asserts."""
+    return [h.label for h in identify_format(text)]
+
+
+class TestIdentifyHashes:
+    def test_md5(self):
+        # MD5("admin") = 21232f297a57a5a743894a0e4a801fc3
+        labels = _labels("21232f297a57a5a743894a0e4a801fc3")
+        assert any("MD5" in l for l in labels)
+
+    def test_sha1(self):
+        labels = _labels("a" * 40)
+        assert any("SHA-1" in l for l in labels)
+
+    def test_sha256(self):
+        labels = _labels("b" * 64)
+        assert any("SHA-256" in l for l in labels)
+
+    def test_sha512(self):
+        labels = _labels("c" * 128)
+        assert any("SHA-512" in l for l in labels)
+
+    def test_hash_does_not_also_flag_hex_bytes(self):
+        # A 32-hex-char string IS valid hex but we report it as MD5
+        # specifically and NOT as a generic "hex bytes" interpretation
+        # (would be noisy).
+        labels = _labels("21232f297a57a5a743894a0e4a801fc3")
+        assert not any("Hex-encoded bytes" in l for l in labels)
+
+
+class TestIdentifyJwt:
+    def test_jwt_detected(self):
+        token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.sig"
+        labels = _labels(token)
+        assert any("JWT" in l for l in labels)
+
+    def test_not_jwt_when_only_two_parts(self):
+        assert not any("JWT" in l for l in _labels("a.b"))
+
+    def test_not_jwt_when_empty_segment(self):
+        # alg=none JWTs end with a trailing dot - the SIG part is empty.
+        # Our heuristic requires all 3 parts non-empty; that's OK because
+        # the user would identify this as base64 instead and the
+        # downstream `jwt` command handles it anyway.
+        assert not any("JWT" in l for l in _labels("a.b."))
+
+
+class TestIdentifyUuid:
+    def test_uuid_v4(self):
+        labels = _labels("01234567-89ab-4cde-9fff-fedcba987654")
+        assert any("UUID v4" in l for l in labels)
+
+    def test_uuid_v1_variant(self):
+        # 3rd group starts with 1 (v1), variant nibble in range
+        labels = _labels("01234567-89ab-1cde-9fff-fedcba987654")
+        assert any("UUID" in l for l in labels)
+
+
+class TestIdentifyNetwork:
+    def test_ipv4(self):
+        labels = _labels("192.168.1.1")
+        assert any("IPv4" in l for l in labels)
+
+    def test_invalid_octet_rejected(self):
+        labels = _labels("999.999.999.999")
+        # Should NOT be flagged as IPv4 (octets out of range).
+        assert not any("IPv4" in l for l in labels)
+
+
+class TestIdentifyTime:
+    def test_epoch_seconds(self):
+        # 1700000000 = 2023-11-14ish
+        labels = _labels("1700000000")
+        assert any("Unix epoch seconds" in l for l in labels)
+
+    def test_epoch_ms(self):
+        labels = _labels("1700000000000")
+        assert any("Unix epoch milliseconds" in l for l in labels)
+
+    def test_iso_timestamp(self):
+        labels = _labels("2026-05-28T14:30:00Z")
+        assert any("ISO 8601" in l for l in labels)
+
+
+class TestIdentifyData:
+    def test_email(self):
+        assert any("Email" in l for l in _labels("user@example.com"))
+
+    def test_url(self):
+        assert any("URL" in l for l in _labels("https://example.com/path"))
+
+    def test_json_object(self):
+        assert any("JSON" in l for l in _labels('{"a": 1}'))
+
+    def test_json_array(self):
+        assert any("JSON" in l for l in _labels('[1, 2, 3]'))
+
+    def test_html(self):
+        assert any("HTML" in l or "XML" in l
+                    for l in _labels("<!DOCTYPE html><html><body></body></html>"))
+
+
+class TestIdentifyCookieShape:
+    def test_username_md5_cookie(self):
+        # This is the BSCP "stay-logged-in" cookie format - MUST detect.
+        labels = _labels("wiener:51dc30ddc473d433366176fa25a71b14")
+        assert any("MD5(password)" in l for l in labels)
+
+    def test_username_sha1_cookie(self):
+        labels = _labels("wiener:" + "a" * 40)
+        assert any("SHA1(password)" in l for l in labels)
+
+    def test_pipe_separated_cookie(self):
+        labels = _labels("admin|2026-06-01")
+        assert any("pipe-separated" in l for l in labels)
+
+    def test_query_string(self):
+        labels = _labels("id=1&user=admin&token=xyz")
+        assert any("query string" in l for l in labels)
+
+
+class TestIdentifyBase64AndHex:
+    def test_base64_flagged(self):
+        # "Hello, world!" base64 = "SGVsbG8sIHdvcmxkIQ=="
+        labels = _labels("SGVsbG8sIHdvcmxkIQ==")
+        assert any("base64" in l for l in labels)
+
+    def test_hex_bytes_when_not_hash_length(self):
+        # 16 hex chars - not a standard hash length, so it's bytes.
+        labels = _labels("48656c6c6f20776f726c64")    # "Hello world"
+        assert any("Hex-encoded" in l for l in labels)
+
+
+class TestIdentifyEmpty:
+    def test_empty_returns_no_hints(self):
+        assert identify_format("") == []
+        assert identify_format("   ") == []

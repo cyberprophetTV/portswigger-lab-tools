@@ -462,6 +462,169 @@ def resolve_op_name(typed: str) -> Operation | None:
 
 
 # =====================================================================
+# FORMAT IDENTIFICATION (the "this looks like X" detector)
+# =====================================================================
+# When the user asks "what is this thing?" we run the input through a
+# bank of pattern detectors. Each returns a (label, suggestion) hint
+# if it matches. Hints tell the user:
+#   1. WHAT the data appears to be (MD5, JWT, IPv4, cookie format, etc.)
+#   2. WHAT they should probably do next (crack it, decode it, tamper it)
+#
+# These are heuristic - same string can match multiple detectors
+# ("32 hex chars" is BOTH a valid MD5 hash AND valid hex-encoded
+# bytes). We just return everything that matches and let the user
+# decide which interpretation is right for their context.
+
+@dataclass
+class FormatHint:
+    label: str          # short identifier ("MD5 hash", "JWT", ...)
+    suggestion: str = ""  # what to do next, optional
+
+
+def identify_format(text: str) -> list[FormatHint]:
+    """Return zero or more FormatHints describing what `text` looks like."""
+    hints: list[FormatHint] = []
+    s = text.strip()
+    if not s:
+        return hints
+
+    # ---- Cryptographic hashes (length-based) ----
+    # These run BEFORE the generic "hex bytes" detector below so we
+    # surface the more-specific hash interpretation first.
+    if re.fullmatch(r"[a-fA-F0-9]{32}", s):
+        hints.append(FormatHint(
+            "MD5 hash (32 hex chars)",
+            "try cracking against a wordlist (hashcat / john / jwt_tool brute for HMAC)"))
+    if re.fullmatch(r"[a-fA-F0-9]{40}", s):
+        hints.append(FormatHint(
+            "SHA-1 hash (40 hex chars)",
+            "obsolete but still common - try cracking against a wordlist"))
+    if re.fullmatch(r"[a-fA-F0-9]{64}", s):
+        hints.append(FormatHint(
+            "SHA-256 hash (64 hex chars)",
+            "modern standard - cracking only works for short / known-pattern inputs"))
+    if re.fullmatch(r"[a-fA-F0-9]{128}", s):
+        hints.append(FormatHint(
+            "SHA-512 hash (128 hex chars)",
+            "expensive to crack - try a small targeted wordlist only"))
+
+    # ---- JWT (3 base64url parts) ----
+    parts = s.split(".")
+    if len(parts) == 3 and all(parts) and all(
+            re.fullmatch(r"[A-Za-z0-9_-]+", p) for p in parts):
+        hints.append(FormatHint(
+            "JWT (3 base64url-encoded parts)",
+            "use `jwt` here, OR run jwt_tool.py for full attacks "
+            "(none-alg, HS256 brute, kid injection)"))
+
+    # ---- UUID v4 (and v1-v5 fallback) ----
+    if re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}"
+            r"-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", s):
+        hints.append(FormatHint(
+            "UUID v4 (random)",
+            "session id - usually unguessable, but check for predictability"))
+    elif re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+            r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", s):
+        hints.append(FormatHint(
+            "UUID (v1/v3/v5 variant)",
+            "v1 leaks the MAC + timestamp of issuance - extract via uuid lib"))
+
+    # ---- IPv4 ----
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)\.(\d+)", s)
+    if m and all(0 <= int(o) <= 255 for o in m.groups()):
+        hints.append(FormatHint(
+            "IPv4 address",
+            "candidate for SSRF target, X-Forwarded-For spoof, IP-based ACL bypass"))
+
+    # ---- Unix epoch ----
+    # 10 digits: seconds since 1970. Plausible range: 2001-2286.
+    if re.fullmatch(r"\d{10}", s) and 1_000_000_000 <= int(s) <= 9_999_999_999:
+        hints.append(FormatHint(
+            "Unix epoch seconds",
+            "use `epoch` to convert to ISO date - tokens / cookies often embed iat/exp"))
+    # 13 digits: milliseconds (JavaScript Date.now() default).
+    if re.fullmatch(r"\d{13}", s):
+        hints.append(FormatHint(
+            "Unix epoch milliseconds",
+            "use `epoch` to convert (auto-detects ms when value > 1e12)"))
+
+    # ---- ISO 8601 timestamp ----
+    if re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", s):
+        hints.append(FormatHint(
+            "ISO 8601 timestamp",
+            "use `iso` to convert to unix epoch"))
+
+    # ---- Email ----
+    if re.fullmatch(r"[\w.+-]+@[\w.-]+\.\w+", s):
+        hints.append(FormatHint(
+            "Email address",
+            "candidate for username-enumeration probes / 'forgot password' flows"))
+
+    # ---- URL ----
+    if re.match(r"https?://", s):
+        hints.append(FormatHint(
+            "URL",
+            "use `purl` to split into scheme/host/path/query, or `defang` "
+            "for safe sharing in reports"))
+
+    # ---- JSON ----
+    if (s.startswith("{") and s.endswith("}")) or \
+       (s.startswith("[") and s.endswith("]")):
+        try:
+            json.loads(s)
+            hints.append(FormatHint(
+                "JSON",
+                "use `json` to pretty-print, `minify` to compact"))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # ---- XML / HTML ----
+    if re.match(r"<\?xml|<!DOCTYPE|<html", s, re.IGNORECASE):
+        hints.append(FormatHint(
+            "HTML / XML document",
+            "inspect for forms, hidden inputs, CSP meta tags, comments"))
+
+    # ---- Cookie-shape detection ----
+    # username:MD5(password) is the classic 'stay-logged-in' lab format.
+    if re.fullmatch(r"[\w.+-]+:[a-fA-F0-9]{32}", s):
+        hints.append(FormatHint(
+            "Looks like `username:MD5(password)` session cookie",
+            "tamper: change username + re-MD5 a guessed password + re-encode (b64)"))
+    if re.fullmatch(r"[\w.+-]+:[a-fA-F0-9]{40}", s):
+        hints.append(FormatHint(
+            "Looks like `username:SHA1(password)` session cookie",
+            "tamper: change username + re-SHA1 a guessed password + re-encode"))
+    if re.fullmatch(r"[\w.+-]+\|[\w.+:%-]+", s):
+        hints.append(FormatHint(
+            "Looks like pipe-separated cookie (`name|value`)",
+            "common cookie format - inspect each part for tampering opportunities"))
+
+    # ---- URL query string ----
+    if "=" in s and "&" in s and not s.startswith("http"):
+        hints.append(FormatHint(
+            "Looks like URL query string",
+            "use `pqs` to parse into key/value pairs"))
+
+    # ---- Generic base64 (only if not already classified above) ----
+    if re.fullmatch(r"[A-Za-z0-9+/_-]+=*", s) and len(s) >= 8 and len(s) % 4 == 0 \
+            and not any(h.label.startswith("JWT") for h in hints):
+        hints.append(FormatHint(
+            "Looks like base64-encoded data",
+            "use `b64d` to decode (works for standard base64 and base64url)"))
+
+    # ---- Hex bytes (only if not already classified as a specific hash) ----
+    if re.fullmatch(r"[0-9a-fA-F]+", s) and len(s) >= 8 and len(s) % 2 == 0 \
+            and not any("hash" in h.label for h in hints):
+        hints.append(FormatHint(
+            "Hex-encoded bytes",
+            "use `hexd` to decode to bytes / ASCII"))
+
+    return hints
+
+
+# =====================================================================
 # MAGIC AUTO-DECODER
 # =====================================================================
 # Run a small set of "likely" decoders against the input and return
@@ -560,7 +723,9 @@ def render_help(console: Console) -> None:
     console.print(Panel(
         Text.assemble(
             ("Control commands:\n", "primary"),
-            ("  magic    ", "accent"), "auto-detect what your input is\n",
+            ("  magic    ", "accent"), "auto-detect: try every decoder, annotate each result\n",
+            ("  identify ", "accent"), "(aliases: id, what) just say what the value LOOKS LIKE\n",
+            ("           ", "accent"), "(MD5? JWT? IPv4? cookie format?) without decoding\n",
             ("  edit     ", "accent"), "replace the current value\n",
             ("  undo     ", "accent"), "roll back the last operation\n",
             ("  reset    ", "accent"), "go back to the original input\n",
@@ -631,30 +796,116 @@ def collect_op_args(op: Operation, q_style) -> dict | None:
     return args
 
 
+def _format_hints_short(hints: list[FormatHint]) -> str:
+    """Compact one-cell display: 'X | Y' or '-' if empty."""
+    if not hints:
+        return "-"
+    return "  •  ".join(h.label for h in hints)
+
+
 def run_magic_picker(console, current: str, q_style) -> str | None:
-    """Try every decoder; if any produced readable output, let user pick one."""
+    """
+    Try every decoder; for each readable result, ALSO run format
+    identification so the user sees not just "From Base64 → wiener:51dc..."
+    but "From Base64 → wiener:51dc... → looks like username:MD5(password)
+    cookie".
+
+    The table layout has 4 columns:
+        # / Decoder used / Result preview / What it looks like
+    Followed by a "Suggestion" block for whichever result the user
+    is most likely to pick.
+    """
+    # First, show what the INPUT itself looks like (in case nothing
+    # needs decoding - the input might already be identifiable).
+    input_hints = identify_format(current)
+    if input_hints:
+        console.print()
+        console.print("[primary]Your input looks like:[/primary]")
+        for h in input_hints:
+            console.print(f"  • [accent]{h.label}[/accent]")
+            if h.suggestion:
+                console.print(f"      [muted]→ {h.suggestion}[/muted]")
+
     candidates = magic_decode(current)
     if not candidates:
-        console.print("[warning]No single-step decoder produced readable output. "
-                      "It may already be plaintext, or it's chain-encoded.[/warning]")
+        if not input_hints:
+            console.print("[warning]No single-step decoder produced readable output. "
+                          "It may already be plaintext, or chain-encoded.[/warning]")
         return None
-    # Print previews so the user picks knowing what each produces.
+
+    # Pre-compute hints for each candidate result.
+    annotated = [(name, result, identify_format(result))
+                 for name, result in candidates]
+
     console.print()
-    console.print("[primary]Magic candidates (each row = one possible decoder):[/primary]")
-    table = Table(show_lines=False, border_style="muted")
-    table.add_column("#", style="accent")
+    console.print("[primary]Decoded candidates  "
+                  "(each row = one possible interpretation):[/primary]")
+    table = Table(show_lines=True, border_style="muted")
+    table.add_column("#", style="accent", width=3)
     table.add_column("Decoder", style="primary")
     table.add_column("Result preview", style="success")
-    for i, (name, result) in enumerate(candidates, start=1):
-        table.add_row(str(i), name, truncate_display(result, 100))
+    table.add_column("Looks like", style="warning")
+    for i, (name, result, hints) in enumerate(annotated, start=1):
+        table.add_row(
+            str(i), name,
+            truncate_display(result, 80),
+            _format_hints_short(hints),
+        )
     console.print(table)
 
-    choices = [f"{i}. {name}" for i, (name, _) in enumerate(candidates, start=1)] + ["[ Cancel ]"]
-    pick = questionary.select("Apply which?", choices=choices, qmark="", style=q_style).ask()
+    # If any candidate had hints with suggestions, print them in a
+    # separate block - the table cells truncate them otherwise.
+    suggestions = [(i, name, hints)
+                   for i, (name, _, hints) in enumerate(annotated, start=1)
+                   if any(h.suggestion for h in hints)]
+    if suggestions:
+        console.print()
+        console.print("[primary]Suggested next steps:[/primary]")
+        for i, name, hints in suggestions:
+            for h in hints:
+                if h.suggestion:
+                    console.print(f"  [accent]#{i}[/accent] ({name}) → "
+                                  f"[muted]{h.suggestion}[/muted]")
+
+    choices = [f"{i}. {name}"
+               for i, (name, _, _) in enumerate(annotated, start=1)] + ["[ Cancel ]"]
+    pick = questionary.select("Apply which?", choices=choices,
+                                qmark="", style=q_style).ask()
     if not pick or pick == "[ Cancel ]":
         return None
     idx = int(pick.split(".", 1)[0]) - 1
-    return candidates[idx][1]
+    return annotated[idx][1]
+
+
+def run_identify(console: Console, current: str) -> None:
+    """
+    Standalone `identify` command - show what the CURRENT value looks
+    like without applying anything. Useful for "I have this string,
+    what is it?" without committing to a decoder.
+    """
+    console.print()
+    hints = identify_format(current)
+    if not hints:
+        console.print(Panel(
+            Text.assemble(
+                ("No recognized format. ", "warning"),
+                "Try ", ("magic ", "accent"),
+                "to see if any decoder produces readable output, ",
+                "or ", ("list ", "accent"),
+                "to browse all operations.",
+            ),
+            border_style="muted", padding=(1, 2),
+        ))
+        return
+    body = Text()
+    body.append(f"The current value ({len(current)} chars) looks like:\n\n",
+                style="primary")
+    for h in hints:
+        body.append(f"  •  {h.label}\n", style="accent")
+        if h.suggestion:
+            body.append(f"       → {h.suggestion}\n", style="muted")
+    console.print(Panel(body.rstrip(), title="identify",
+                          border_style="primary", padding=(1, 2)))
 
 
 def make_questionary_style():
@@ -674,12 +925,14 @@ def show_banner(console: Console):
         ("  —  ", "muted"),
         ("offline mini-CyberChef\n\n", "primary"),
         ("Type an alias to apply an op, or a control command:\n", "muted"),
-        ("  magic ", "accent"), "(auto-detect)   ",
-        ("b64 / b64d ", "accent"), "(base64)   ",
-        ("url / urld ", "accent"), "(URL)\n",
-        ("  hex / hexd ", "accent"), "(hex)   ",
-        ("sha256 / md5 ", "accent"), "(hash)   ",
-        ("jwt ", "accent"), "(JWT decode)\n",
+        ("  magic ", "accent"), "(auto-decode + annotate)   ",
+        ("identify ", "accent"), "(what IS this thing?)\n",
+        ("  b64 / b64d ", "accent"), "(base64)   ",
+        ("url / urld ", "accent"), "(URL)   ",
+        ("hex / hexd ", "accent"), "(hex)\n",
+        ("  sha256 / md5 ", "accent"), "(hash)   ",
+        ("jwt ", "accent"), "(JWT decode)   ",
+        ("json ", "accent"), "(pretty-print)\n",
         ("  help ", "accent"), "= full cheat sheet   ",
         ("list ", "accent"), "= every operation   ",
         ("undo ", "accent"), "/ ",
@@ -692,7 +945,8 @@ def show_banner(console: Console):
 
 # Reserved keywords - these route to control actions, not operations.
 CONTROL_COMMANDS = {
-    "magic", "edit", "undo", "reset", "save",
+    "magic", "identify", "id", "what",
+    "edit", "undo", "reset", "save",
     "help", "list", "q", "quit", "exit",
 }
 
@@ -809,6 +1063,10 @@ def tui_loop(initial: str):
             if result is not None:
                 history.append(result)
                 recipe.append(("Magic (auto)", {}))
+            continue
+
+        if cmd_lower in ("identify", "id", "what"):
+            run_identify(console, current)
             continue
 
         # ---- Operation by alias or name ----
