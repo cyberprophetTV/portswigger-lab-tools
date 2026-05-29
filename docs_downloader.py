@@ -35,18 +35,33 @@ Then DURING the exam, instant lookup:
 TWO FILTER MODES
 ----------------
 Use `--filter critical` to grab ONLY exam/vuln-relevant pages
-(skips "About us", "Pricing", "Customer Stories", marketing pages,
-etc.). Use the default `--filter all` to mirror everything.
+(skips "About us", "Pricing", "Customer Stories", etc.). Use the
+default `--filter all` to mirror everything.
 
-  python3 docs_downloader.py https://portswigger.net/web-security \\
-      --output docs/portswigger --filter critical    # focused vault
-  python3 docs_downloader.py https://portswigger.net/web-security \\
-      --output docs/portswigger --filter all         # full mirror
+For known sources (portswigger.net, owasp.org, hacktricks.xyz,
+attack.mitre.org, PayloadsAllTheThings on GitHub) we use a curated
+URL ALLOWLIST + DENYLIST that knows the actual structure of each
+site - NOT keyword guessing. PortSwigger Academy lives at
+`/web-security/<topic>/...`; that's what we keep. `/about/`,
+`/customers/`, `/pricing/`, the all-topics index, etc. are
+explicitly skipped. Auto-detected from the start URL host;
+override with `--site portswigger|owasp|hacktricks|...`.
 
-Tune what counts as "critical" with `--filter-words` (text body
-match) or `--filter-url-pattern` (URL path match). Use `--dry-run`
-to preview WITHOUT writing files - lets you tune the filter
-before a long crawl.
+For unknown sources we fall back to: code-block density (vuln
+write-ups have many <pre>/<code> blocks; marketing pages have
+none) + URL/body keyword heuristics. Keyword matching alone is a
+weak signal - the site preset is what makes critical mode useful.
+
+  python3 docs_downloader.py --list-presets                  # see what's known
+  python3 docs_downloader.py https://portswigger.net/web-security \\
+      --output docs/portswigger --filter critical            # uses preset
+  python3 docs_downloader.py https://portswigger.net/web-security \\
+      --output docs/portswigger --filter critical --site none  # force heuristic
+  python3 docs_downloader.py https://portswigger.net/web-security \\
+      --output docs/portswigger --filter all                 # full mirror
+
+Use `--dry-run` to preview WITHOUT writing files - lets you tune
+before committing to a long crawl.
 
 WHY THIS BYPASSES BURP (intentional)
 ------------------------------------
@@ -126,14 +141,28 @@ from proxy_spider import extract_urls, in_scope
 # from them so we can reach nested critical pages buried under a
 # non-critical hub) - just not WRITTEN to disk.
 #
-# Two layers, OR'd:
-#   1. URL path contains any CRITICAL_URL_PATTERN (cheap, fast)
-#   2. Stripped page text contains any CRITICAL_KEYWORD (slower but
-#      catches "Security" articles whose URL doesn't make the topic
-#      obvious)
+# Four signals, checked in order of reliability:
+#   1. SITE PRESET (most reliable). If we recognize the host
+#      (portswigger.net, owasp.org, hacktricks.xyz, github.com
+#      PayloadsAllTheThings, ...) we have a curated URL allowlist
+#      AND denylist hand-tuned for that site's actual structure.
+#      PortSwigger Academy lives at /web-security/<topic>/...;
+#      everything under /about/, /customers/, /pricing/ is noise.
+#      A keyword like "vulnerability" never had to appear anywhere.
+#   2. CODE-BLOCK DENSITY (good signal for tutorial pages). Vuln
+#      write-ups have many <pre>/<code> blocks (payloads, request
+#      examples, SQL snippets). Marketing pages have zero. >=3
+#      code blocks = likely a vuln write-up.
+#   3. URL pattern (fallback when no preset matches). Substring
+#      check against CRITICAL_URL_PATTERNS.
+#   4. Body keyword (last resort). Substring check against
+#      CRITICAL_KEYWORDS in the cleaned text. Weakest signal -
+#      sites that don't say "SQL injection" in plain text won't
+#      trip it.
 #
-# Override either with --filter-url-pattern / --filter-words for
-# domain-specific tuning.
+# Override the preset choice with --site (auto-detected by default),
+# the URL patterns with --filter-url-pattern, the keywords with
+# --filter-words. `--list-presets` prints the known sites.
 
 # Substrings that, when present in a URL path, mark the page as
 # critical even before fetching. Lowercased for case-insensitive
@@ -194,15 +223,187 @@ def is_critical_text(text: str, keywords: list[str]) -> bool:
 def is_critical(url: str, text: str,
                  url_patterns: list[str], keywords: list[str]) -> tuple[bool, str]:
     """
-    Compose URL + text checks. Returns (is_critical, reason). The
-    reason string is shown in the log so the user understands WHY a
-    page was kept or skipped.
+    Compose URL + text checks. Returns (is_critical, reason).
+
+    NOTE: This is the SHALLOW heuristic - URL pattern + body keyword,
+    no site awareness. Used as a fallback when no site preset matches.
+    For the smart path (site preset + code-block density), see
+    `decide_critical()`.
     """
     if is_critical_url(url, url_patterns):
         return True, "URL pattern match"
     if is_critical_text(text, keywords):
         return True, "keyword match in body"
     return False, "no critical signal"
+
+
+# ---------------------------------------------------------------------
+# SITE PRESETS - hand-tuned allow/deny lists for known docs sources
+# =====================================================================
+# These are the high-signal filters. Each preset knows the actual
+# URL structure of a real site, so we don't have to guess from text.
+#
+# For PortSwigger Academy: everything under /web-security/ is
+# exam-relevant. /about/, /customers/, /pricing/ aren't.
+# /web-security/all-topics is just an index of links - skip it.
+#
+# `hosts` is checked with `host.endswith()` so subdomain variants
+# count (academy.portswigger.net would still match).
+SITE_PRESETS: dict[str, dict] = {
+    "portswigger": {
+        "hosts": ["portswigger.net"],
+        "allow": [
+            "/web-security/",          # The Academy (the main thing)
+            "/burp/documentation/",    # Burp Suite docs - Intruder/Repeater/Collab
+            "/research/",              # PortSwigger Research papers
+            "/daily-swig/",            # Daily Swig news items
+            "/kb/",                    # Knowledge base
+        ],
+        "deny": [
+            "/about/", "/customers/", "/case-studies/",
+            "/pricing/", "/buy/", "/requestquote/", "/users/",
+            "/jobs/", "/contact/", "/login/", "/register/",
+            "/newsletter/", "/events/", "/community/",
+            "/web-security/all-topics",   # Just an index page
+            "/web-security/all-labs",     # Just an index page
+            "/web-security/learning-paths",
+            "/burp/communitydownload",
+            "/burp/pro/trial",
+        ],
+    },
+    "owasp": {
+        "hosts": ["owasp.org", "cheatsheetseries.owasp.org"],
+        "allow": [
+            "/www-community/attacks/",
+            "/www-community/vulnerabilities/",
+            "/www-community/controls/",
+            "/cheatsheets/",
+            "/Top10/",
+            "/www-project-top-ten/",
+            "/www-project-web-security-testing-guide/",
+            "/www-project-application-security-verification-standard/",
+        ],
+        "deny": [
+            "/sponsors/", "/membership/", "/corporate-membership/",
+            "/jobs/", "/events/", "/chapters/", "/about/",
+            "/donate/", "/foundation/", "/news/",
+        ],
+    },
+    "hacktricks": {
+        "hosts": ["book.hacktricks.xyz", "hacktricks.xyz",
+                  "book.hacktricks.wiki", "hacktricks.wiki"],
+        # HackTricks is almost entirely vuln content - allow root,
+        # deny only the meta pages.
+        "allow": ["/"],
+        "deny": [
+            "/welcome/", "/welcome-readme",
+            "/about-the-author", "/sponsors",
+            "/donate", "/training", "/courses",
+            "/external-links",
+        ],
+    },
+    "payloads-all-the-things": {
+        # The famous swisskyrepo collection
+        "hosts": ["github.com", "raw.githubusercontent.com"],
+        "allow": [
+            "/swisskyrepo/payloadsallthethings/",
+        ],
+        "deny": [
+            "/swisskyrepo/payloadsallthethings/blob/master/.github/",
+            "/swisskyrepo/payloadsallthethings/tree/master/.github/",
+            "/issues", "/pulls", "/actions", "/projects",
+            "/stargazers", "/network/",
+        ],
+    },
+    "mitre-attack": {
+        "hosts": ["attack.mitre.org"],
+        "allow": [
+            "/techniques/", "/tactics/", "/groups/",
+            "/software/", "/mitigations/",
+        ],
+        "deny": ["/resources/", "/contribute/", "/contact/"],
+    },
+}
+
+
+def find_site_preset(url: str,
+                      presets: dict[str, dict]) -> tuple[str | None, dict | None]:
+    """
+    Return (preset_name, preset) if url's host matches a known
+    site preset, else (None, None).
+
+    Match rule: host endswith any entry in preset['hosts']. So
+    `academy.portswigger.net` matches `portswigger.net`.
+    """
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    for name, preset in presets.items():
+        if any(host == h or host.endswith("." + h) for h in preset["hosts"]):
+            return name, preset
+    return None, None
+
+
+def site_preset_decision(url: str,
+                          preset: dict) -> tuple[str, str]:
+    """
+    Apply a site preset's allow/deny rules to a URL.
+
+    Returns ('keep'|'skip', reason). Deny wins over allow (so a
+    specific deny pattern can carve an exception out of a broad
+    allow). If neither matches, returns 'skip' - presets are
+    allowlists; pages outside the allowlist are noise.
+    """
+    path = urllib.parse.urlparse(url).path.lower()
+    # Deny first - allow patterns might be broader.
+    for d in preset["deny"]:
+        if d.lower() in path:
+            return "skip", f"matches deny: {d}"
+    for a in preset["allow"]:
+        if a.lower() in path:
+            return "keep", f"matches allow: {a}"
+    return "skip", "not on allowlist"
+
+
+# ---------------------------------------------------------------------
+# CODE-BLOCK DENSITY - vuln write-ups have many; marketing has zero
+# ---------------------------------------------------------------------
+_CODE_BLOCK_RE = re.compile(r"<(pre|code)\b[^>]*>", re.IGNORECASE)
+
+
+def count_code_blocks(html: str) -> int:
+    """Count <pre> and <code> opening tags in raw HTML."""
+    return len(_CODE_BLOCK_RE.findall(html))
+
+
+# ---------------------------------------------------------------------
+# Top-level critical decision: layer site preset > code density >
+# URL pattern > body keyword.
+# ---------------------------------------------------------------------
+def decide_critical(url: str, html: str, text: str,
+                     preset: dict | None,
+                     url_patterns: list[str],
+                     keywords: list[str],
+                     code_block_threshold: int = 3) -> tuple[bool, str]:
+    """
+    Layered critical-content decision. Returns (keep, reason).
+
+    Priority:
+      1. Site preset (most reliable, hand-tuned)
+      2. Code-block density (good signal across sites)
+      3. URL pattern (fallback)
+      4. Body keyword (last resort)
+    """
+    # 1. Site preset - if active, it's authoritative.
+    if preset is not None:
+        decision, reason = site_preset_decision(url, preset)
+        return decision == "keep", f"preset: {reason}"
+
+    # 2. Code-block density - works on most tutorial-style sites.
+    blocks = count_code_blocks(html)
+    if blocks >= code_block_threshold:
+        return True, f"{blocks} code blocks (tutorial-like)"
+
+    # 3. + 4. URL pattern, then body keyword.
+    return is_critical(url, text, url_patterns, keywords)
 
 
 # ---------------------------------------------------------------------
@@ -352,12 +553,34 @@ def download(args, session: requests.Session) -> dict:
     url_patterns = [p.strip().lower() for p in url_patterns if p.strip()]
     keywords = [k.strip().lower() for k in keywords if k.strip()]
 
+    # Resolve site preset - explicit --site wins, else auto-detect
+    # from the start URL host, else None (falls through to heuristic).
+    preset_name = None
+    preset = None
+    if args.filter == "critical":
+        if args.site and args.site != "auto":
+            if args.site == "none":
+                preset_name, preset = None, None
+            elif args.site in SITE_PRESETS:
+                preset_name, preset = args.site, SITE_PRESETS[args.site]
+            else:
+                print(f"{tag_err()} unknown --site '{args.site}'; "
+                      f"valid: {','.join(SITE_PRESETS)}")
+                sys.exit(2)
+        else:
+            preset_name, preset = find_site_preset(args.url, SITE_PRESETS)
+
     print(f"{tag_info()} start: {bold(args.url)}")
     print(f"{tag_info()} output dir: {bold(str(args.output))}")
     print(f"{tag_info()} bypassing proxy (intentional - speed + cleanliness)")
     print(f"{tag_info()} filter mode: {bold(args.filter)}", end="")
     if args.filter == "critical":
-        print(f"  ({len(url_patterns)} URL patterns, {len(keywords)} keywords)")
+        if preset is not None:
+            print(f"  (site preset: {bold(preset_name)}, "
+                  f"{len(preset['allow'])} allow / {len(preset['deny'])} deny)")
+        else:
+            print(f"  (no site preset - heuristic: code-density + "
+                  f"{len(url_patterns)} URL patterns + {len(keywords)} keywords)")
     else:
         print("  (save every page)")
     if args.dry_run:
@@ -412,7 +635,9 @@ def download(args, session: requests.Session) -> dict:
 
                 # Filter decision
                 if args.filter == "critical":
-                    keep, reason = is_critical(url, text, url_patterns, keywords)
+                    keep, reason = decide_critical(
+                        url, body, text, preset, url_patterns, keywords,
+                    )
                     if not keep:
                         skipped_filter += 1
                         print(f"  [{status}]  {dim('skip-filter')}  {url}  "
@@ -479,11 +704,13 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("url",
+    ap.add_argument("url", nargs="?",
                     help="Docs URL to start from  "
-                         "(example: https://portswigger.net/web-security)")
-    ap.add_argument("--output", type=Path, required=True,
-                    help="Output directory to mirror the doc tree into")
+                         "(example: https://portswigger.net/web-security). "
+                         "Optional ONLY when used with --list-presets.")
+    ap.add_argument("--output", type=Path,
+                    help="Output directory to mirror the doc tree into "
+                         "(required unless --list-presets)")
 
     # Scope
     ap.add_argument("--any-host", action="store_true",
@@ -499,20 +726,33 @@ def main():
     # Filter mode - the headline feature.
     ap.add_argument("--filter", choices=["all", "critical"], default="all",
                     help="all: save every in-scope page (default, current behavior). "
-                         "critical: only save pages whose URL or text content looks "
-                         "vuln/exam-relevant. Non-critical pages are still CRAWLED "
-                         "(their URLs feed the frontier) but not written to disk - "
-                         "so a non-critical hub linking to critical leaf pages still "
-                         "works.")
+                         "critical: only save vuln/exam-relevant pages, using a "
+                         "site-specific allowlist when available (portswigger.net, "
+                         "owasp.org, hacktricks, MITRE ATT&CK, PayloadsAllTheThings) "
+                         "and falling back to code-block density + URL/body keyword "
+                         "matching. Non-critical pages are still CRAWLED for link "
+                         "discovery - just not written to disk.")
+    ap.add_argument("--site",
+                    choices=["auto", "none"] + list(SITE_PRESETS.keys()),
+                    default="auto",
+                    help="Which site preset to use for the critical-mode allowlist. "
+                         "auto (default): pick the preset matching the start URL's "
+                         "host, or fall back to the keyword heuristic if no preset "
+                         "matches. none: force the keyword heuristic even when a "
+                         "preset would match. Or pick one explicitly.")
+    ap.add_argument("--list-presets", action="store_true",
+                    help="Print the known site presets (host + allow/deny rules) "
+                         "and exit. Useful for checking what your --site choice "
+                         "actually does.")
     ap.add_argument("--filter-words", default="",
                     help="Comma-separated list of keywords to OVERRIDE the built-in "
-                         "CRITICAL_KEYWORDS list. Match is case-insensitive substring "
-                         "against the stripped page text. "
+                         "CRITICAL_KEYWORDS list (only used when no site preset is "
+                         "active). Case-insensitive substring against page text. "
                          "Example: --filter-words 'jwt,oauth,saml'")
     ap.add_argument("--filter-url-pattern", default="",
                     help="Comma-separated list of substrings to OVERRIDE the built-in "
-                         "CRITICAL_URL_PATTERNS list. Match is case-insensitive against "
-                         "the URL path. "
+                         "CRITICAL_URL_PATTERNS list (only used when no site preset "
+                         "is active). Case-insensitive against the URL path. "
                          "Example: --filter-url-pattern '/labs/,/cheatsheet/'")
     ap.add_argument("--dry-run", action="store_true",
                     help="Show what WOULD be saved without writing any files. "
@@ -531,6 +771,19 @@ def main():
     ap.add_argument("--insecure", action="store_true")
 
     args = ap.parse_args()
+
+    if args.list_presets:
+        print(f"{tag_info()} known site presets:\n")
+        for name, preset in SITE_PRESETS.items():
+            print(f"  {bold(name)}")
+            print(f"    hosts: {', '.join(preset['hosts'])}")
+            print(f"    allow: {', '.join(preset['allow'])}")
+            print(f"    deny : {', '.join(preset['deny'])}")
+            print()
+        sys.exit(0)
+
+    if not args.url or not args.output:
+        ap.error("url and --output are required (unless --list-presets)")
 
     if args.insecure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
