@@ -679,6 +679,147 @@ class TestIdentifyVendorTokens:
         token = "glpat-" + "A" * 20
         assert any("GitLab" in l for l in _labels(token))
 
+    def test_openai_user_key(self):
+        token = "sk-" + "A" * 48
+        assert any("OpenAI" in l and "user / org" in l for l in _labels(token))
+
+    def test_openai_project_key(self):
+        token = "sk-proj-" + "A" * 40
+        assert any("OpenAI" in l and "project" in l for l in _labels(token))
+
+    def test_openai_service_account(self):
+        token = "sk-svcacct-" + "A" * 40
+        assert any("OpenAI" in l and "service account" in l for l in _labels(token))
+
+    def test_anthropic_key(self):
+        token = "sk-ant-" + "A" * 80
+        assert any("Anthropic" in l for l in _labels(token))
+
+    def test_anthropic_not_also_flagged_as_openai(self):
+        # sk-ant-... starts with sk- so the naive OpenAI regex
+        # matches too. Negative-lookahead suppresses that.
+        token = "sk-ant-" + "A" * 80
+        labels = _labels(token)
+        assert any("Anthropic" in l for l in labels)
+        assert not any("OpenAI" in l for l in labels)
+
+    def test_google_service_account_json(self):
+        s = '{"type": "service_account", "project_id": "x", "private_key": "y"}'
+        assert any("Google Cloud service-account" in l for l in _labels(s))
+
+    def test_google_service_account_no_space(self):
+        # Compact-JSON form (no space after `:`) should also detect.
+        s = '{"type":"service_account","project_id":"x"}'
+        assert any("Google Cloud service-account" in l for l in _labels(s))
+
+    def test_google_api_key(self):
+        token = "AIza" + "A" * 35
+        assert any("Google API key" in l for l in _labels(token))
+
+    def test_twilio_sk(self):
+        token = "SK" + "a" * 32
+        assert any("Twilio API key SID" in l for l in _labels(token))
+
+    def test_twilio_account_sid(self):
+        token = "AC" + "f" * 32
+        assert any("Twilio Account SID" in l for l in _labels(token))
+
+    def test_sendgrid(self):
+        token = "SG." + "A" * 22 + "." + "B" * 43
+        assert any("SendGrid" in l for l in _labels(token))
+
+    def test_mailgun_legacy(self):
+        token = "key-" + "a" * 32
+        assert any("Mailgun" in l for l in _labels(token))
+
+    def test_npm_token(self):
+        token = "npm_" + "A" * 36
+        assert any("npm access token" in l for l in _labels(token))
+
+    def test_docker_hub_pat(self):
+        token = "dckr_pat_" + "A" * 27
+        assert any("Docker Hub" in l for l in _labels(token))
+
+    def test_discord_bot_token(self):
+        token = "M" + "A" * 23 + "." + "B" * 6 + "." + "C" * 27
+        labels = _labels(token)
+        assert any("Discord bot token" in l for l in labels)
+
+    def test_discord_token_not_also_flagged_as_jwt(self):
+        # Discord tokens have the same SHAPE as JWTs (3 base64url
+        # parts) but the first part isn't a JSON header - so the JWT
+        # detector (which now JSON-parses the first part) should NOT
+        # also flag this. Avoids the user being told the same token
+        # is "two different things at once".
+        token = "M" + "A" * 23 + "." + "B" * 6 + "." + "C" * 27
+        labels = _labels(token)
+        assert not any("JWT" in l for l in labels)
+
+
+class TestIdentifyPrivateKeys:
+    def test_rsa_private_key(self):
+        pem = ("-----BEGIN RSA PRIVATE KEY-----\n"
+               "MIIEpAIBAAKCAQEA...\n"
+               "-----END RSA PRIVATE KEY-----")
+        labels = _labels(pem)
+        assert any("PEM-armored RSA private key" in l for l in labels)
+
+    def test_pem_dashes_not_flagged_as_sql_comment(self):
+        # Regression: the `--` SQL comment detector used to match
+        # the trailing dashes in "-----END ... -----". Now requires
+        # a non-dash precede + space-or-EOL after to disambiguate.
+        pem = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
+               "data\n"
+               "-----END OPENSSH PRIVATE KEY-----")
+        labels = _labels(pem)
+        # Should be detected as a private key, NOT as a SQL injection.
+        assert any("PEM-armored OpenSSH" in l for l in labels)
+        assert not any("SQL injection" in l for l in labels)
+
+    def test_openssh_private_key(self):
+        pem = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
+               "b3BlbnNzaC1rZXkt...\n"
+               "-----END OPENSSH PRIVATE KEY-----")
+        labels = _labels(pem)
+        assert any("PEM-armored OpenSSH private key" in l for l in labels)
+
+    def test_ec_private_key(self):
+        pem = ("-----BEGIN EC PRIVATE KEY-----\nMHcCAQ...\n-----END EC PRIVATE KEY-----")
+        labels = _labels(pem)
+        assert any("PEM-armored EC private key" in l for l in labels)
+
+    def test_x509_certificate(self):
+        pem = ("-----BEGIN CERTIFICATE-----\nMIIDazCCAlOgAwIB...\n-----END CERTIFICATE-----")
+        labels = _labels(pem)
+        assert any("PEM X.509 certificate" in l for l in labels)
+
+    def test_pgp_private_key(self):
+        pem = ("-----BEGIN PGP PRIVATE KEY BLOCK-----\nxYY...\n-----END PGP PRIVATE KEY BLOCK-----")
+        labels = _labels(pem)
+        assert any("PGP private key" in l for l in labels)
+
+
+class TestJwtFalsePositiveAvoidance:
+    def test_real_jwt_still_detected(self):
+        # Sanity: tightening the detector didn't break the real case.
+        # Header: {"alg":"HS256","typ":"JWT"} -> eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+        token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ4In0.sig"
+        labels = _labels(token)
+        assert any("JWT" in l for l in labels)
+
+    def test_random_3_dot_string_not_jwt(self):
+        # Looks JWT-shaped but the first part isn't valid base64 JSON.
+        token = "ABCDEF.GHIJKL.MNOPQR"
+        labels = _labels(token)
+        assert not any("JWT" in l for l in labels)
+
+    def test_jwt_without_alg_field_rejected(self):
+        # Valid base64 JSON header but no `alg` field - per RFC, not
+        # a real JWT. {"foo":"bar"} -> eyJmb28iOiJiYXIifQ
+        token = "eyJmb28iOiJiYXIifQ.eyJzdWIiOiJ4In0.sig"
+        labels = _labels(token)
+        assert not any("JWT" in l for l in labels)
+
 
 class TestIdentifyAttackPayloads:
     def test_path_traversal_plain(self):

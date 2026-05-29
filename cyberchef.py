@@ -528,14 +528,25 @@ def identify_format(text: str) -> list[FormatHint]:
             "SHA-512 hash (128 hex chars)",
             "expensive to crack - try a small targeted wordlist only"))
 
-    # ---- JWT (3 base64url parts) ----
+    # ---- JWT (3 base64url parts WITH valid JSON header containing alg) ----
+    # Shape alone is ambiguous: Discord bot tokens have the same 3-parts-
+    # dot-separated structure. To avoid false positives we ALSO verify
+    # the first part is base64url-decodable JSON with an `alg` field
+    # (the universal JWT header marker).
     parts = s.split(".")
     if len(parts) == 3 and all(parts) and all(
             re.fullmatch(r"[A-Za-z0-9_-]+", p) for p in parts):
-        hints.append(FormatHint(
-            "JWT (3 base64url-encoded parts)",
-            "use `jwt` here, OR run jwt_tool.py for full attacks "
-            "(none-alg, HS256 brute, kid injection)"))
+        try:
+            pad = (-len(parts[0])) % 4
+            header_dict = json.loads(
+                base64.urlsafe_b64decode(parts[0] + "=" * pad))
+            if isinstance(header_dict, dict) and "alg" in header_dict:
+                hints.append(FormatHint(
+                    "JWT (3 base64url-encoded parts)",
+                    "use `jwt` here, OR run jwt_tool.py for full attacks "
+                    "(none-alg, HS256 brute, kid injection)"))
+        except (ValueError, binascii.Error, UnicodeDecodeError):
+            pass
 
     # ---- UUID v4 (and v1-v5 fallback) ----
     if re.fullmatch(
@@ -693,13 +704,107 @@ def identify_format(text: str) -> list[FormatHint]:
         hints.append(FormatHint(
             "GitLab personal access token",
             "CRITICAL if exposed - revoke at GitLab user settings"))
+    # OpenAI: sk-..., sk-proj-..., sk-svcacct-...
+    # Negative lookahead for `ant-` so we don't also match sk-ant-X
+    # which is Anthropic (handled below).
+    if re.match(r"sk-(?!ant-)(proj-|svcacct-)?[A-Za-z0-9_-]{20,}$", s):
+        kind = ("project key" if s.startswith("sk-proj-") else
+                "service account" if s.startswith("sk-svcacct-") else
+                "user / org key")
+        hints.append(FormatHint(
+            f"OpenAI API key ({kind})",
+            "CRITICAL if exposed - revoke at platform.openai.com/api-keys. "
+            "Bills per-token usage; leaked key = immediate financial damage."))
+    # Anthropic: sk-ant-... (api / admin keys both share this prefix)
+    if re.match(r"sk-ant-[A-Za-z0-9_-]{50,}$", s):
+        hints.append(FormatHint(
+            "Anthropic API key",
+            "CRITICAL if exposed - revoke at console.anthropic.com. "
+            "Same financial-damage profile as OpenAI."))
+    # Google service account file - the JSON has telltale fields. We
+    # check string-prefix because it's the most distinctive part.
+    if '"type": "service_account"' in s or '"type":"service_account"' in s:
+        hints.append(FormatHint(
+            "Google Cloud service-account JSON key",
+            "CRITICAL if exposed - revoke at console.cloud.google.com/iam-admin/"
+            "serviceaccounts. Contains a private_key field that grants the "
+            "whole service account's permissions."))
+    # Google API key (not OAuth) - AIza prefix is distinctive
+    if re.fullmatch(r"AIza[A-Za-z0-9_-]{35}", s):
+        hints.append(FormatHint(
+            "Google API key (AIza prefix)",
+            "Often public-by-design (Maps/embed keys), but check if scoped to "
+            "billing-enabled APIs. Restrict by HTTP referrer / IP / SDK."))
+    # Twilio
+    if re.fullmatch(r"SK[a-fA-F0-9]{32}", s):
+        hints.append(FormatHint(
+            "Twilio API key SID (SK...)",
+            "Pairs with a separate secret. Used to send SMS/WhatsApp."))
+    if re.fullmatch(r"AC[a-fA-F0-9]{32}", s):
+        hints.append(FormatHint(
+            "Twilio Account SID (AC...)",
+            "Account ID - not secret by itself, but reveals the account."))
+    # SendGrid: SG.<22 chars>.<43 chars>
+    if re.fullmatch(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}", s):
+        hints.append(FormatHint(
+            "SendGrid API key",
+            "Lets the bearer send email as the account - phishing risk."))
+    # Mailgun
+    if re.fullmatch(r"key-[a-f0-9]{32}", s):
+        hints.append(FormatHint(
+            "Mailgun API key (legacy format)",
+            "Lets the bearer send email as the account."))
+    # npm tokens
+    if re.fullmatch(r"npm_[A-Za-z0-9]{36}", s):
+        hints.append(FormatHint(
+            "npm access token",
+            "CRITICAL if has 'publish' scope - supply-chain attack vector. "
+            "Revoke at npmjs.com -> Access Tokens."))
+    # Docker Hub PAT
+    if re.fullmatch(r"dckr_pat_[A-Za-z0-9_-]{27,}", s):
+        hints.append(FormatHint(
+            "Docker Hub personal access token",
+            "Lets the bearer push images = supply-chain attack."))
+    # Discord bot token - 3 base64url-ish parts separated by dots,
+    # but DIFFERENT shape than JWT (specific length pattern).
+    if re.fullmatch(r"[MN][A-Za-z0-9_-]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}", s):
+        hints.append(FormatHint(
+            "Discord bot token",
+            "Lets the bearer control the bot account fully. "
+            "Revoke at discord.com/developers/applications/<app>/bot."))
+    # Heroku API key - looks like a UUID. Handled by UUID detector
+    # already (we noted UUID v4 above); no extra hint needed.
+
+    # ---- Private keys / certificates (PEM-armored) ----
+    if "-----BEGIN " in s and "PRIVATE KEY-----" in s:
+        algo = "RSA" if "RSA PRIVATE KEY" in s else (
+               "EC" if "EC PRIVATE KEY" in s else (
+               "OpenSSH" if "OPENSSH PRIVATE KEY" in s else
+               "generic PKCS#8"))
+        hints.append(FormatHint(
+            f"PEM-armored {algo} private key",
+            "CRITICAL - the private half of an asymmetric keypair. "
+            "Whatever uses the public key trusts the holder of this."))
+    if "-----BEGIN CERTIFICATE-----" in s:
+        hints.append(FormatHint(
+            "PEM X.509 certificate",
+            "Public - the cert itself isn't sensitive, but if paired with a "
+            "private key in the same file or directory, that IS."))
+    if "-----BEGIN PGP " in s and "PRIVATE KEY" in s.upper():
+        hints.append(FormatHint(
+            "PGP private key block",
+            "CRITICAL - decrypts messages encrypted to the corresponding public key."))
 
     # ---- Attack-payload signals (the user pasted a payload to see if it looks right) ----
     if re.search(r"\.\.[/\\]", s) or "%2e%2e" in s.lower() or "..%2f" in s.lower():
         hints.append(FormatHint(
             "Path traversal payload (../ or %2e%2e variant)",
             "test against file-reading endpoints: file=, page=, include=, view=, etc."))
-    if re.search(r"(\bUNION\s+SELECT\b|\bOR\s+\d+\s*=\s*\d+|--\s*$|/\*.*\*/|;\s*DROP\b|"
+    # `--` SQL comment: tightened with a negative lookbehind so PEM
+    # delimiters like `-----` don't trip it. Also accept the `-- `
+    # (dash-dash-space) variant which is the SQL standard.
+    if re.search(r"(\bUNION\s+SELECT\b|\bOR\s+\d+\s*=\s*\d+|(?<!-)--\s+|(?<!-)--$|"
+                 r"/\*[^*]*\*/|;\s*DROP\b|"
                  r"information_schema|SLEEP\s*\(|BENCHMARK\s*\()", s, re.IGNORECASE):
         hints.append(FormatHint(
             "SQL injection payload",
@@ -741,7 +846,10 @@ def identify_format(text: str) -> list[FormatHint]:
     # actively wrong for them (an AWS key isn't base64 of anything).
     _SPECIFIC_PREFIXES = ("JWT", "AWS", "GitHub", "Stripe", "Slack", "GitLab",
                            "HTTP Basic", "Bcrypt", "Argon2", "crypt(3)",
-                           "MongoDB", "MD5", "SHA-")
+                           "MongoDB", "MD5", "SHA-",
+                           "OpenAI", "Anthropic", "Google", "Twilio",
+                           "SendGrid", "Mailgun", "npm", "Docker", "Discord",
+                           "PEM-armored", "PEM X.509", "PGP private")
     if (re.fullmatch(r"[A-Za-z0-9+/_-]+=*", s) and len(s) >= 8 and len(s) % 4 == 0
             and not any(h.label.startswith(_SPECIFIC_PREFIXES) for h in hints)):
         hints.append(FormatHint(
