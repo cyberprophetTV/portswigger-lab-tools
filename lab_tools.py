@@ -312,6 +312,28 @@ TOOLS: list[Tool] = [
         ],
     ),
     Tool(
+        key="param_miner",
+        name="Hidden parameter discovery (param miner)",
+        script="param_miner.py",
+        description=(
+            "Find hidden admin/debug parameters that don't appear in normal "
+            "browser traffic. For each name in a wordlist (admin, debug, "
+            "role, isAdmin, ...), append it to your request with truthy "
+            "values (true/1/admin/yes) and flag responses that diverge "
+            "from baseline. Auto-handles URL-encoded and JSON bodies."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("request_file", "Raw HTTP request template (must include a POST body)",
+                   default="examples/login.txt", kind="path"),
+            Prompt("--params", "Parameter wordlist",
+                   default="hidden-params.txt", kind="path"),
+            Prompt("--noise-tolerance", "Ignore length diffs within +/-N bytes "
+                                       "(useful for noisy responses)",
+                   default="0", required=False),
+        ],
+    ),
+    Tool(
         key="dirbuster",
         name="Content discovery (dirbusting)",
         script="dirbuster.py",

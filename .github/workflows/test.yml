@@ -36,6 +36,7 @@ jobs:
           python3 subtle_response_solver.py --help > /dev/null
           python3 timing_attack_solver.py --help > /dev/null
           python3 dirbuster.py --help > /dev/null
+          python3 param_miner.py --help > /dev/null
 
       - name: Smoke-test lab_tools imports
         # Can't actually run lab_tools in CI (interactive prompts),
