@@ -14,6 +14,7 @@ import pytest
 from intruder import (
     MARKER_RE, RawRequest, parse_range_spec, range_matches, Matcher,
     parse_jitter, sniper, battering_ram, pitchfork, cluster_bomb,
+    apply_encoding, parse_encode_chain, ENCODERS,
 )
 
 
@@ -293,3 +294,69 @@ class TestJitter:
     ])
     def test_parse(self, s, expected):
         assert parse_jitter(s) == expected
+
+
+# ---------------------------------------------------------------------
+# Payload encoders (--encode)
+# ---------------------------------------------------------------------
+class TestEncoders:
+    def test_none_is_identity(self):
+        assert ENCODERS["none"]("abc") == "abc"
+
+    def test_url_encodes_special_chars(self):
+        # Single quote, space, equals, ampersand - all common in SQLi
+        # payloads, all must be percent-encoded with safe="".
+        assert ENCODERS["url"]("' OR 1=1") == "%27%20OR%201%3D1"
+        # `/` is in `safe=""` for our encoder (we override the default).
+        assert ENCODERS["url"]("a/b") == "a%2Fb"
+
+    def test_double_url(self):
+        # Double-URL: each %XX itself becomes %25XX.
+        assert ENCODERS["double-url"]("'") == "%2527"
+
+    def test_base64(self):
+        assert ENCODERS["base64"]("admin") == "YWRtaW4="
+
+    def test_hex(self):
+        assert ENCODERS["hex"]("OR") == "4f52"
+
+    def test_html(self):
+        assert ENCODERS["html"]("<script>") == "&lt;script&gt;"
+
+
+class TestApplyEncoding:
+    def test_empty_chain_is_identity(self):
+        assert apply_encoding("hello", []) == "hello"
+
+    def test_chain_applies_in_order(self):
+        # url first: '/' -> '%2F'. Then base64 the result.
+        once = ENCODERS["url"]("a/b")
+        twice = ENCODERS["base64"](once)
+        assert apply_encoding("a/b", ["url", "base64"]) == twice
+
+    def test_chain_reversed_gives_different_result(self):
+        # base64 first, then url - very different from url then base64.
+        forward  = apply_encoding("a/b", ["url", "base64"])
+        reverse  = apply_encoding("a/b", ["base64", "url"])
+        assert forward != reverse
+
+
+class TestParseEncodeChain:
+    def test_empty_returns_empty_list(self):
+        assert parse_encode_chain("") == []
+
+    def test_none_returns_empty_list(self):
+        assert parse_encode_chain("none") == []
+
+    def test_single(self):
+        assert parse_encode_chain("url") == ["url"]
+
+    def test_comma_separated(self):
+        assert parse_encode_chain("url,base64") == ["url", "base64"]
+
+    def test_whitespace_tolerated(self):
+        assert parse_encode_chain("url , base64") == ["url", "base64"]
+
+    def test_unknown_encoder_exits(self):
+        with pytest.raises(SystemExit):
+            parse_encode_chain("rot13")

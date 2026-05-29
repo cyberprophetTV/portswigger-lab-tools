@@ -164,12 +164,15 @@ password brute-force lab:
 # IMPORTS
 # ---------------------------------------------------------------------
 import argparse                              # CLI parsing
+import base64                                # for --encode base64
+import html                                  # for --encode html
 import itertools                             # cartesian product for cluster bomb
 import json                                  # --output file format
 import random                                # jitter
 import re                                    # marker + matcher regexes
 import sys                                   # sys.exit on errors
 import time                                  # time.sleep + time.monotonic
+import urllib.parse                          # for --encode url
 from concurrent.futures import (             # parallel request execution
     ThreadPoolExecutor,
     as_completed,
@@ -336,6 +339,69 @@ def build_session(
 def read_wordlist(path: Path) -> list[str]:
     """One entry per line; strip whitespace; drop blank lines."""
     return [w for w in (line.strip() for line in path.read_text().splitlines()) if w]
+
+
+# ---------------------------------------------------------------------
+# PAYLOAD ENCODERS
+# ---------------------------------------------------------------------
+# Apply transformations to each payload before sending it. The classic
+# WAF-evasion move: a filter blocks `' OR 1=1--` but waves through
+# `%27%20OR%201%3D1--`. Or the filter URL-decodes once, so you
+# double-URL-encode: `%2527%2520OR%25201%253D1--`.
+#
+# Encodings can be chained: --encode url,base64 applies URL first,
+# then base64 to the result. Order matters - "url,base64" is the
+# base64 of the URL-encoded payload; "base64,url" is the URL-encoded
+# base64.
+ENCODERS = {
+    # No-op. Useful as the explicit "I checked, I don't want encoding"
+    # value, or as a placeholder in a chain.
+    "none":       lambda s: s,
+    # Percent-encode every byte that isn't an unreserved character.
+    # `safe=""` is critical - urllib.parse.quote's default keeps `/`
+    # un-encoded, which we don't want for payload values.
+    "url":        lambda s: urllib.parse.quote(s, safe=""),
+    # Apply URL encoding twice. Common WAF bypass when the filter
+    # decodes once but the app decodes again.
+    "double-url": lambda s: urllib.parse.quote(urllib.parse.quote(s, safe=""), safe=""),
+    # Standard base64. Useful when the parameter expects a base64
+    # blob (e.g. Authorization: Basic) or as a WAF-bypass technique.
+    "base64":     lambda s: base64.b64encode(s.encode()).decode(),
+    # Each byte as two hex chars. Used in some path-traversal bypasses
+    # (`%2e%2e%2f` is "..%2f" in single-decoded then "../" in double).
+    "hex":        lambda s: s.encode().hex(),
+    # HTML entity encoding. Less common as an attack-side transform;
+    # more useful when probing XSS reflection points to see if angle
+    # brackets get escaped or preserved.
+    "html":       lambda s: html.escape(s, quote=True),
+}
+
+
+def parse_encode_chain(s: str) -> list[str]:
+    """
+    Parse a --encode value into an ordered list of encoder names.
+
+    Empty string / 'none' -> []  (no encoding).
+    'url' -> ['url']
+    'url,base64' -> ['url', 'base64']
+
+    Validates that every name is a known encoder.
+    """
+    if not s or s.strip().lower() == "none":
+        return []
+    names = [name.strip().lower() for name in s.split(",") if name.strip()]
+    for n in names:
+        if n not in ENCODERS:
+            sys.exit(f"[!] unknown encoding {n!r}. "
+                     f"Available: {', '.join(sorted(ENCODERS))}")
+    return names
+
+
+def apply_encoding(payload: str, chain: list[str]) -> str:
+    """Run the payload through each encoder in order. Empty chain returns input as-is."""
+    for name in chain:
+        payload = ENCODERS[name](payload)
+    return payload
 
 
 # =====================================================================
@@ -672,6 +738,7 @@ class FuzzConfig:
     proxy: str | None
     insecure: bool
     retries: int
+    encode_chain: list[str] = field(default_factory=list)   # see ENCODERS
 
 
 # =====================================================================
@@ -702,6 +769,15 @@ def fuzz(cfg: FuzzConfig) -> None:
 
     # ---- Load payload set(s) ----
     payload_sets = [read_wordlist(p) for p in cfg.payload_files]
+
+    # ---- Apply --encode chain to every payload ----
+    # We transform here rather than inside the attack iterators so
+    # the encoded form is what shows up in --verbose / --output for
+    # debugging. The label is "what was actually sent on the wire."
+    if cfg.encode_chain:
+        payload_sets = [[apply_encoding(p, cfg.encode_chain) for p in ps]
+                        for ps in payload_sets]
+        print(f"{tag_info()} encoding : {' -> '.join(cfg.encode_chain)}")
 
     # ---- Pick the attack iterator + validate payload-set count ----
     if cfg.mode in ("sniper", "battering-ram"):
@@ -852,6 +928,18 @@ def main():
                          "Auto-enables --insecure")
     ap.add_argument("--insecure", action="store_true",
                     help="Skip TLS verification (auto-on with --proxy)")
+    # ---- Payload encoding ----
+    ap.add_argument(
+        "--encode",
+        type=parse_encode_chain,
+        default=[],
+        metavar="CHAIN",
+        help="Encode each payload before sending. Comma-separated chain of "
+             "encoders applied in order. Encoders: "
+             "none, url, double-url, base64, hex, html. "
+             "Examples: --encode url, --encode url,base64 (URL then base64), "
+             "--encode double-url",
+    )
     args = ap.parse_args()
 
     # ---- Build the matcher from the four match-* args ----
@@ -901,6 +989,7 @@ def main():
         proxy=proxy,
         insecure=insecure,
         retries=args.retries,
+        encode_chain=args.encode,
     )
 
     fuzz(cfg)
