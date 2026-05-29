@@ -348,6 +348,21 @@ TOOLS: list[Tool] = [
         ],
     ),
     Tool(
+        key="cheatsheet",
+        name="Cheatsheet (browsable payload reference)",
+        script="cheatsheet.py",
+        description=(
+            "Categorized offline payload reference: SQLi, XSS, SSRF, JWT, "
+            "command injection, SSTI, XXE, file upload, CSRF, NoSQLi, LDAP, "
+            "race conditions, web cache poisoning, path traversal, open "
+            "redirect, deserialization, plus more. Browse by category, "
+            "search by keyword, or `list` all entries. Curated for what "
+            "actually shows up on the BSCP exam."
+        ),
+        lab_url=None,
+        prompts=[],
+    ),
+    Tool(
         key="cyberchef",
         name="CyberChef (offline TUI - encode/decode/hash/parse)",
         script="cyberchef.py",
