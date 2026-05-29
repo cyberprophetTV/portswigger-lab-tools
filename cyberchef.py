@@ -20,21 +20,31 @@ calls to the live CyberChef instance, no telemetry, no upload of
 the (potentially sensitive) tokens / cookies / payloads you're
 analyzing.
 
-THE TUI FLOW
-------------
+THE TUI FLOW (REDESIGNED FOR LOW FRICTION)
+------------------------------------------
   1. Provide input (paste text, load file, or pipe via stdin).
-  2. Pick an operation from the categorized menu.
-  3. (For ops that need args - HMAC key, salt, AES IV - prompt for them.)
-  4. The result becomes the NEW current input.
-  5. Repeat - chain operations into a recipe.
-  6. Undo to peel back the last operation.
-  7. "Magic" mode tries every single-step decoder on the current
-     input and shows which produce readable output.
-  8. Save the final output to a file when done, or just copy from
-     the terminal.
+  2. The prompt asks "What next?" and accepts ANY of:
+       - An operation name or short alias:
+           b64        -> To Base64
+           b64d       -> From Base64
+           sha256     -> SHA-256
+           url / urld -> To/From URL
+           hex / hexd -> To/From Hex
+           jwt        -> JWT decode
+           magic      -> auto-detect what the input is
+           ... (see `help` for the full list)
+       - A control command:
+           magic / edit / undo / reset / save / help / list / quit
+       - Type a few letters and TAB or the arrow keys to autocomplete
+         the operation name from the catalog.
+  3. For ops that need extra args (HMAC key, byte count) we ask once.
+  4. The result becomes the NEW current value, pushed onto the
+     history stack. Recipe panel updates.
+  5. Undo pops the stack (lossless, not a replay).
 
-The history stack is per-step, so undo restores the exact state
-before the last operation (not a replay - cheap, lossless).
+Compared to the original two-step menu (category -> operation),
+this collapses to ONE prompt and TWO keypresses for the common case
+(type alias, hit Enter).
 
 OPERATIONS INCLUDED
 -------------------
@@ -385,6 +395,73 @@ OPERATIONS: list[Operation] = [
 
 
 # =====================================================================
+# SHORT ALIASES
+# =====================================================================
+# Map quick-to-type shortcuts to full operation names. Saves the user
+# from typing "To Base64" when they really meant b64. Built once at
+# module load - we use it for autocomplete + lookup.
+ALIASES: dict[str, str] = {
+    # Encoding (e=encode, d=decode)
+    "b64":     "To Base64",       "b64e":   "To Base64",
+    "b64d":    "From Base64",
+    "b32":     "To Base32",       "b32d":   "From Base32",
+    "url":     "To URL",          "urle":   "To URL",
+    "urld":    "From URL",
+    "url2":    "To URL (double)", "url2d":  "From URL (double)",
+    "hex":     "To Hex",          "hexd":   "From Hex",
+    "bin":     "To Binary",       "bind":   "From Binary",
+    "html":    "To HTML entities","htmld":  "From HTML entities",
+    "rot":     "ROT13",           "rot13":  "ROT13",
+    # Hashing
+    "md5":     "MD5",
+    "sha1":    "SHA-1",
+    "sha256":  "SHA-256",         "sha":    "SHA-256",
+    "sha384":  "SHA-384",
+    "sha512":  "SHA-512",
+    "hmac":    "HMAC-SHA256",
+    # String
+    "rev":     "Reverse",
+    "upper":   "Upper case",      "up":     "Upper case",
+    "lower":   "Lower case",      "lo":     "Lower case",
+    "strip":   "Strip whitespace","trim":   "Strip whitespace",
+    "count":   "Count (chars/lines/words)",
+    "sort":    "Sort lines",
+    "uniq":    "Unique lines",    "dedupe": "Unique lines",
+    # Data
+    "json":    "JSON pretty-print",
+    "minify":  "JSON minify",     "jsonmin": "JSON minify",
+    "purl":    "Parse URL",       "parseurl": "Parse URL",
+    "pqs":     "Parse query string",
+    # Defang
+    "defang":  "Defang URL",      "defangu":   "Defang URL",
+    "refang":  "Refang URL",      "refangu":   "Refang URL",
+    "defange": "Defang email",
+    "refange": "Refang email",
+    # Time
+    "epoch":   "Unix epoch → ISO 8601",
+    "iso":     "ISO 8601 → Unix epoch",
+    "now":     "Now (current UTC)",
+    # Misc
+    "rand":    "Random hex bytes","randhex": "Random hex bytes",
+    "uuid":    "UUID v4",
+    "jwt":     "JWT decode",      "jwtd":   "JWT decode",
+}
+
+
+def resolve_op_name(typed: str) -> Operation | None:
+    """Look up an operation by alias OR full name. Case-insensitive."""
+    typed = typed.strip()
+    if not typed:
+        return None
+    # Alias lookup is case-insensitive
+    target = ALIASES.get(typed.lower(), typed)
+    for op in OPERATIONS:
+        if op.name.lower() == target.lower():
+            return op
+    return None
+
+
+# =====================================================================
 # MAGIC AUTO-DECODER
 # =====================================================================
 # Run a small set of "likely" decoders against the input and return
@@ -476,23 +553,68 @@ def show_state(console: Console, current: str, recipe: list[tuple[str, dict]]) -
         console.print(Panel(recipe_text, title="Recipe", border_style="accent"))
 
 
-def pick_operation(q_style) -> Operation | None:
-    """Two-step pick: category, then operation within category."""
-    categories = sorted(set(op.category for op in OPERATIONS))
-    category = questionary.select(
-        "Category:", choices=categories + ["[ Cancel ]"], qmark="›", style=q_style,
-    ).ask()
-    if not category or category == "[ Cancel ]":
-        return None
-    in_cat = [op for op in OPERATIONS if op.category == category]
-    # Display: "name - description" so the user picks knowing what it does.
-    labels = [f"{op.name}  —  {op.description}" for op in in_cat]
-    pick = questionary.select(
-        "Operation:", choices=labels + ["[ Back ]"], qmark="›", style=q_style,
-    ).ask()
-    if not pick or pick == "[ Back ]":
-        return None
-    return next(op for op in in_cat if pick.startswith(op.name + "  —"))
+# ----- LIST + HELP commands (printed when user types `list` / `help`) -----
+def render_help(console: Console) -> None:
+    """Print the cheat sheet so the user can see what's available."""
+    console.print()
+    console.print(Panel(
+        Text.assemble(
+            ("Control commands:\n", "primary"),
+            ("  magic    ", "accent"), "auto-detect what your input is\n",
+            ("  edit     ", "accent"), "replace the current value\n",
+            ("  undo     ", "accent"), "roll back the last operation\n",
+            ("  reset    ", "accent"), "go back to the original input\n",
+            ("  save     ", "accent"), "write current value to a file\n",
+            ("  list     ", "accent"), "show every operation grouped by category\n",
+            ("  help     ", "accent"), "show this help\n",
+            ("  q / quit ", "accent"), "exit\n",
+            "\n",
+            ("Operation aliases (or type the full name):\n", "primary"),
+            ("  b64 / b64d        ", "accent"), "Base64 encode / decode\n",
+            ("  url / urld        ", "accent"), "URL encode / decode\n",
+            ("  url2 / url2d      ", "accent"), "double-URL encode / decode\n",
+            ("  hex / hexd        ", "accent"), "Hex encode / decode\n",
+            ("  bin / bind        ", "accent"), "Binary encode / decode\n",
+            ("  html / htmld      ", "accent"), "HTML entity encode / decode\n",
+            ("  b32 / b32d        ", "accent"), "Base32 encode / decode\n",
+            ("  rot / rot13       ", "accent"), "ROT13 cipher (self-inverse)\n",
+            ("  md5 / sha1 /      ", "accent"), "hash to hex digest\n",
+            ("  sha256 / sha512   ", "accent"), "\n",
+            ("  hmac              ", "accent"), "HMAC-SHA256 (prompts for key)\n",
+            ("  rev / upper /     ", "accent"), "Reverse / Upper case / Lower case\n",
+            ("  lower / strip     ", "accent"), "\n",
+            ("  json / minify     ", "accent"), "JSON pretty-print / minify\n",
+            ("  purl / pqs        ", "accent"), "Parse URL / parse query string\n",
+            ("  defang / refang   ", "accent"), "URL defang/refang for IOC sharing\n",
+            ("  epoch / iso / now ", "accent"), "Time conversions\n",
+            ("  uuid / rand       ", "accent"), "Generate UUID / random hex bytes\n",
+            ("  jwt               ", "accent"), "JWT decode + show header/payload\n",
+            "\n",
+            ("Tip: type a few letters and the prompt autocompletes. "
+             "Use `list` for the full operation catalog.", "muted"),
+        ),
+        title="cyberchef quick reference",
+        border_style="primary",
+        padding=(1, 2),
+    ))
+
+
+def render_op_list(console: Console) -> None:
+    """Print every operation, grouped by category, as a table."""
+    console.print()
+    by_cat: dict[str, list[Operation]] = {}
+    for op in OPERATIONS:
+        by_cat.setdefault(op.category, []).append(op)
+    for cat in sorted(by_cat):
+        table = Table(title=cat, border_style="muted", title_style="primary",
+                       show_lines=False)
+        table.add_column("Name", style="accent")
+        table.add_column("Aliases", style="success")
+        table.add_column("Description", style="muted")
+        for op in by_cat[cat]:
+            aliases = [a for a, name in ALIASES.items() if name == op.name]
+            table.add_row(op.name, ", ".join(aliases) or "-", op.description)
+        console.print(table)
 
 
 def collect_op_args(op: Operation, q_style) -> dict | None:
@@ -550,12 +672,38 @@ def show_banner(console: Console):
     body = Text.assemble(
         ("cyberchef.py", "banner"),
         ("  —  ", "muted"),
-        ("offline mini-CyberChef\n", "primary"),
-        ("Chain operations on the current value. ", "muted"),
-        ("Undo to roll back the last step.\n", "muted"),
-        ("All computation is local - nothing leaves your machine.", "warning"),
+        ("offline mini-CyberChef\n\n", "primary"),
+        ("Type an alias to apply an op, or a control command:\n", "muted"),
+        ("  magic ", "accent"), "(auto-detect)   ",
+        ("b64 / b64d ", "accent"), "(base64)   ",
+        ("url / urld ", "accent"), "(URL)\n",
+        ("  hex / hexd ", "accent"), "(hex)   ",
+        ("sha256 / md5 ", "accent"), "(hash)   ",
+        ("jwt ", "accent"), "(JWT decode)\n",
+        ("  help ", "accent"), "= full cheat sheet   ",
+        ("list ", "accent"), "= every operation   ",
+        ("undo ", "accent"), "/ ",
+        ("save ", "accent"), "/ ",
+        ("q ", "accent"), "= quit\n\n",
+        ("All computation is local — nothing leaves your machine.", "warning"),
     )
     console.print(Panel(body, border_style="primary", padding=(1, 2)))
+
+
+# Reserved keywords - these route to control actions, not operations.
+CONTROL_COMMANDS = {
+    "magic", "edit", "undo", "reset", "save",
+    "help", "list", "q", "quit", "exit",
+}
+
+
+def _prompt_choices() -> list[str]:
+    """All valid autocomplete suggestions: control commands + op names + aliases."""
+    return (
+        sorted(CONTROL_COMMANDS)
+        + sorted(ALIASES.keys())
+        + sorted(op.name for op in OPERATIONS)
+    )
 
 
 def tui_loop(initial: str):
@@ -568,60 +716,79 @@ def tui_loop(initial: str):
     history: list[str] = [initial]
     recipe: list[tuple[str, dict]] = []
 
+    completer_choices = _prompt_choices()
+
     while True:
         current = history[-1]
         show_state(console, current, recipe)
 
-        action = questionary.select(
-            "Next:",
-            choices=[
-                "Apply operation",
-                "Magic (auto-decode)",
-                "Edit current value",
-                "Save to file",
-                "Undo last operation",
-                "Reset to original input",
-                "Quit",
-            ],
-            qmark="›", style=q_style,
+        # ONE prompt for everything. Autocomplete suggests as you type
+        # so you don't have to remember exact names; meta=False lets
+        # the user type ANYTHING (including unrecognized strings -
+        # we handle those gracefully below).
+        cmd = questionary.autocomplete(
+            "› cyberchef >",
+            choices=completer_choices,
+            meta_information={c: "" for c in completer_choices},
+            ignore_case=True,
+            match_middle=True,
+            validate=lambda x: True,    # anything goes; we validate in code
+            style=q_style,
         ).ask()
 
-        if action is None or action == "Quit":
+        if cmd is None:
             console.print("[muted]bye[/muted]")
             break
 
-        if action == "Apply operation":
-            op = pick_operation(q_style)
-            if op is None:
-                continue
-            args = collect_op_args(op, q_style)
-            if args is None:
-                continue
-            try:
-                result = op.fn(current, args)
-            except Exception as e:
-                # Operation failed (bad input, etc.) - report and don't push.
-                console.print(f"[error]operation failed: {e}[/error]")
-                continue
-            history.append(result)
-            recipe.append((op.name, args))
+        cmd_lower = cmd.strip().lower()
+        if not cmd_lower:
+            continue
 
-        elif action == "Magic (auto-decode)":
-            result = run_magic_picker(console, current, q_style)
-            if result is not None:
-                history.append(result)
-                recipe.append(("Magic (auto)", {}))
+        # ---- Control commands ----
+        if cmd_lower in ("q", "quit", "exit"):
+            console.print("[muted]bye[/muted]")
+            break
 
-        elif action == "Edit current value":
-            new = questionary.text("Replace current value:", default=current,
-                                    qmark="›", style=q_style, multiline=True).ask()
+        if cmd_lower == "help":
+            render_help(console)
+            continue
+
+        if cmd_lower == "list":
+            render_op_list(console)
+            continue
+
+        if cmd_lower == "undo":
+            if len(history) <= 1:
+                console.print("[muted]nothing to undo[/muted]")
+            else:
+                history.pop()
+                recipe.pop()
+                console.print(f"[muted]undone[/muted]")
+            continue
+
+        if cmd_lower == "reset":
+            if len(history) == 1:
+                console.print("[muted]already at original input[/muted]")
+            else:
+                history = [history[0]]
+                recipe = []
+                console.print(f"[muted]reset to original input[/muted]")
+            continue
+
+        if cmd_lower == "edit":
+            new = questionary.text(
+                "Replace current value (multiline, Esc + Enter to finish):",
+                default=current, qmark="›", style=q_style, multiline=True,
+            ).ask()
             if new is None:
                 continue
             history.append(new)
             recipe.append(("Edit", {}))
+            continue
 
-        elif action == "Save to file":
-            path = questionary.path("Save to:", qmark="›", style=q_style).ask()
+        if cmd_lower == "save":
+            path = questionary.path("Save to (example: out.txt):",
+                                     qmark="›", style=q_style).ask()
             if not path:
                 continue
             try:
@@ -629,17 +796,33 @@ def tui_loop(initial: str):
                 console.print(f"[success]wrote {len(current)} chars to {path}[/success]")
             except OSError as e:
                 console.print(f"[error]write failed: {e}[/error]")
+            continue
 
-        elif action == "Undo last operation":
-            if len(history) <= 1:
-                console.print("[muted]nothing to undo[/muted]")
-                continue
-            history.pop()
-            recipe.pop()
+        if cmd_lower == "magic":
+            result = run_magic_picker(console, current, q_style)
+            if result is not None:
+                history.append(result)
+                recipe.append(("Magic (auto)", {}))
+            continue
 
-        elif action == "Reset to original input":
-            history = [history[0]]
-            recipe = []
+        # ---- Operation by alias or name ----
+        op = resolve_op_name(cmd)
+        if op is None:
+            console.print(f"[warning]unknown: {cmd!r}. "
+                          f"Type [bold]help[/bold] for the cheat sheet, "
+                          f"or [bold]list[/bold] for every operation.[/warning]")
+            continue
+
+        args = collect_op_args(op, q_style)
+        if args is None:
+            continue
+        try:
+            result = op.fn(current, args)
+        except Exception as e:
+            console.print(f"[error]{op.name} failed: {e}[/error]")
+            continue
+        history.append(result)
+        recipe.append((op.name, args))
 
 
 # =====================================================================

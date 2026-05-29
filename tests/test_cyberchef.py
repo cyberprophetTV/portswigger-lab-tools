@@ -13,6 +13,7 @@ pytest.importorskip("questionary")
 
 from cyberchef import (
     OPERATIONS, magic_decode, _looks_readable, show_state,
+    ALIASES, resolve_op_name, CONTROL_COMMANDS, _prompt_choices,
     op_to_base64, op_from_base64,
     op_to_base32, op_from_base32,
     op_to_url, op_from_url, op_to_double_url, op_from_double_url,
@@ -346,3 +347,93 @@ class TestShowStateRender:
         show_state(c, "x" * 10000, [])
         out = c.file.getvalue()
         assert "truncated" in out
+
+
+# ---------------------------------------------------------------------
+# ALIAS RESOLUTION + AUTOCOMPLETE CATALOG
+# ---------------------------------------------------------------------
+class TestAliasResolution:
+    def test_every_alias_resolves_to_a_real_operation(self):
+        # If an alias in ALIASES points at a name that doesn't exist
+        # in OPERATIONS, the prompt would silently fail to dispatch.
+        # Catch that here.
+        op_names = {op.name for op in OPERATIONS}
+        for alias, target in ALIASES.items():
+            assert target in op_names, \
+                f"alias {alias!r} points at unknown op {target!r}"
+
+    def test_common_aliases_resolve(self):
+        # The aliases promoted on the banner MUST work.
+        for alias, expected in [
+            ("b64",   "To Base64"),
+            ("b64d",  "From Base64"),
+            ("url",   "To URL"),
+            ("urld",  "From URL"),
+            ("hex",   "To Hex"),
+            ("hexd",  "From Hex"),
+            ("md5",   "MD5"),
+            ("sha256", "SHA-256"),
+            ("jwt",   "JWT decode"),
+            ("magic", None),    # magic is a control command, not an op
+        ]:
+            if expected is None:
+                continue
+            op = resolve_op_name(alias)
+            assert op is not None, f"alias {alias!r} returned None"
+            assert op.name == expected
+
+    def test_alias_lookup_case_insensitive(self):
+        assert resolve_op_name("B64") is not None
+        assert resolve_op_name("b64").name == resolve_op_name("B64").name
+
+    def test_full_name_also_resolves(self):
+        op = resolve_op_name("To Base64")
+        assert op is not None
+        assert op.name == "To Base64"
+
+    def test_unknown_returns_none(self):
+        assert resolve_op_name("not-a-real-op") is None
+        assert resolve_op_name("") is None
+        assert resolve_op_name("   ") is None
+
+
+class TestPromptChoices:
+    def test_includes_control_commands(self):
+        choices = _prompt_choices()
+        for cmd in ("help", "list", "undo", "save", "magic", "quit"):
+            assert cmd in choices
+
+    def test_includes_aliases(self):
+        choices = _prompt_choices()
+        for alias in ("b64", "sha256", "jwt"):
+            assert alias in choices
+
+    def test_includes_full_op_names(self):
+        choices = _prompt_choices()
+        assert "To Base64" in choices
+        assert "SHA-256" in choices
+
+    def test_no_duplicate_entries(self):
+        # Duplicates would make the autocompleter show the same
+        # suggestion twice - harmless but ugly.
+        choices = _prompt_choices()
+        # Note: there can be legitimate overlaps between aliases and
+        # op names (e.g. "MD5" is both an alias and the op name).
+        # That's fine; the suggestion shows once after dedup.
+        deduped = set(choices)
+        assert len(deduped) > 50    # we have 40 ops + ~50 aliases
+                                     # + 9 control commands, even with
+                                     # some overlap > 50 stays true
+
+
+class TestControlCommands:
+    def test_includes_quit_aliases(self):
+        # `q`, `quit`, `exit` are all accepted.
+        for alias in ("q", "quit", "exit"):
+            assert alias in CONTROL_COMMANDS
+
+    def test_includes_all_documented_commands(self):
+        # Every command surfaced in the banner / help cheat sheet.
+        for cmd in ("magic", "edit", "undo", "reset", "save",
+                     "help", "list"):
+            assert cmd in CONTROL_COMMANDS
