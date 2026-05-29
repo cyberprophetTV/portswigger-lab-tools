@@ -257,6 +257,10 @@ class Tool:
     description: str        # 2-3 line summary shown after selection
     lab_url: str | None     # PortSwigger lab URL, if any
     prompts: list[Prompt]
+    # Which vulnerability classes this tool targets. Shown in the tool
+    # intro panel + in the "vulnerability matrix" menu entry, so the
+    # user knows WHEN to reach for which tool.
+    vulnerabilities: list[str] = field(default_factory=list)
 
 
 TOOLS: list[Tool] = [
@@ -278,6 +282,10 @@ TOOLS: list[Tool] = [
             Prompt("passwords", "Passwords wordlist path  (one password per line, e.g. passwords.txt)",
                    default="passwords.txt", kind="path"),
         ],
+        vulnerabilities=[
+            "Username enumeration (response-content leak)",
+            "Authentication / credential brute-force",
+        ],
     ),
     Tool(
         key="enum_subtle",
@@ -296,6 +304,10 @@ TOOLS: list[Tool] = [
                    default="usernames.txt", kind="path"),
             Prompt("passwords", "Passwords wordlist path  (one password per line, e.g. passwords.txt)",
                    default="passwords.txt", kind="path"),
+        ],
+        vulnerabilities=[
+            "Username enumeration (subtle content delta)",
+            "Authentication / credential brute-force",
         ],
     ),
     Tool(
@@ -318,6 +330,10 @@ TOOLS: list[Tool] = [
                    default="passwords.txt", kind="path"),
             Prompt("--samples", "Samples per candidate  (integer; more = slower + more reliable, e.g. 3, 5, 10)",
                    default="3"),
+        ],
+        vulnerabilities=[
+            "Username enumeration (response-time / timing oracle)",
+            "Authentication / timing-oracle attacks",
         ],
     ),
     Tool(
@@ -346,6 +362,12 @@ TOOLS: list[Tool] = [
                    default="cloudflared", kind="select",
                    choices=["cloudflared", "serveo", "localhost.run"]),
         ],
+        vulnerabilities=[
+            "Stored / reflected XSS (cookie exfil)",
+            "CSRF (host the attacker's form)",
+            "File-upload delivery (webshells, polyglots)",
+            "Open redirect chain landing pages",
+        ],
     ),
     Tool(
         key="cheatsheet",
@@ -361,6 +383,11 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[],
+        vulnerabilities=[
+            "ALL classes - reference for SQLi/XSS/SSRF/JWT/SSTI/XXE/"
+            "command-inj/file-upload/CSRF/NoSQLi/LDAP/race/cache-poison/"
+            "path-traversal/open-redirect/deserialization",
+        ],
     ),
     Tool(
         key="cyberchef",
@@ -380,6 +407,11 @@ TOOLS: list[Tool] = [
                               "(blank to type interactively in the TUI)",
                    default="", kind="path", required=False),
         ],
+        vulnerabilities=[
+            "Token / cookie / payload analysis (decode, hash, identify)",
+            "JWT inspection (decode + flag security observations)",
+            "Encoded-blob recognition (magic auto-detect mode)",
+        ],
     ),
     Tool(
         key="workflow",
@@ -398,6 +430,13 @@ TOOLS: list[Tool] = [
             Prompt("workflow_file", "Workflow JSON or YAML file  "
                                     "(see examples/workflow-*.json for templates)",
                    default="examples/workflow-login-csrf-fuzz.json", kind="path"),
+        ],
+        vulnerabilities=[
+            "Multi-step CSRF (login -> fetch CSRF -> submit forged)",
+            "Cross-app SSRF (App A's SSRF pivots to App B's internal endpoints)",
+            "Stateful auth flows (OAuth, multi-factor, password reset)",
+            "Session-pinning logout traps (via clear_cookies)",
+            "Any vuln that requires per-iteration state refresh",
         ],
     ),
     Tool(
@@ -424,6 +463,12 @@ TOOLS: list[Tool] = [
                                   "e.g. user.json)",
                    default="", kind="path", required=False),
         ],
+        vulnerabilities=[
+            "IDOR / Broken Object-Level Authorization (BOLA)",
+            "Broken access control",
+            "Privilege escalation (horizontal + vertical)",
+            "Forced browsing past per-role restrictions",
+        ],
     ),
     Tool(
         key="security_audit",
@@ -438,6 +483,13 @@ TOOLS: list[Tool] = [
         lab_url=None,
         prompts=[
             Prompt("url", "Target URL  (example: https://target.com/dashboard)"),
+        ],
+        vulnerabilities=[
+            "Missing security headers (CSP, HSTS, X-Frame-Options, etc.)",
+            "Insecure cookies (no HttpOnly / Secure / SameSite)",
+            "Tech-stack disclosure (Server / X-Powered-By leaks)",
+            "Chained vuln pre-condition: XSS, CSRF, clickjacking, "
+            "session hijacking risk indicators",
         ],
     ),
     Tool(
@@ -463,6 +515,14 @@ TOOLS: list[Tool] = [
                                        "(integer; e.g. 5 for noisy responses, 0 for strict)",
                    default="0", required=False),
         ],
+        vulnerabilities=[
+            "Mass assignment / parameter pollution",
+            "Hidden admin / debug functionality (admin=true, debug=1, ...)",
+            "Privilege escalation via undocumented backend params",
+            "HTTP method override (_method, X-HTTP-Method-Override)",
+            "Prototype pollution (__proto__, constructor) entry points",
+            "SSRF / open-redirect via undocumented URL params",
+        ],
     ),
     Tool(
         key="dirbuster",
@@ -485,6 +545,14 @@ TOOLS: list[Tool] = [
             Prompt("--extensions", "Extensions to try, comma-separated  "
                                    "(e.g. '.php,.bak,.zip' or blank to skip)",
                    default="", required=False),
+        ],
+        vulnerabilities=[
+            "Forced browsing (admin panels, dev endpoints)",
+            "Information disclosure (.git, .env, backup files)",
+            "Hidden API endpoints (/api/v1, internal/, debug/)",
+            "Source code exposure (WEB-INF/, .git/config, package.json)",
+            "Pre-condition for many other vulns (you can't exploit "
+            "what you haven't found)",
         ],
     ),
     Tool(
@@ -519,6 +587,18 @@ TOOLS: list[Tool] = [
                                      "(examples: '!3168' = anything-but-3168, "
                                      "'5000-' = 5000+; blank = no filter)",
                    default="", required=False),
+        ],
+        vulnerabilities=[
+            "SQL Injection (all flavors: error / boolean / time-based / OOB)",
+            "XSS (with --detect-reflection)",
+            "Path traversal (with path-traversal-payloads.txt)",
+            "SSRF (with --oob-host + a URL/host wordlist)",
+            "OS command injection (--match-time-delta for blind)",
+            "Server-side template injection (test-payload wordlist)",
+            "Open redirect",
+            "Authentication brute force (credentials wordlist)",
+            "Web cache poisoning (with unkeyed-headers.txt)",
+            "ANY 'swap X into position Y' fuzzing",
         ],
     ),
 ]
@@ -624,6 +704,7 @@ def make_console(theme_name: str) -> Console:
 
 
 _MOTIVATION_ACTION = "Show motivation (Brain Unloader)"
+_VULN_MATRIX_ACTION = "Show tool → vulnerability matrix"
 
 
 def show_tool_menu(console: Console) -> Tool | None | str:
@@ -647,7 +728,8 @@ def show_tool_menu(console: Console) -> Tool | None | str:
     console.print(table)
 
     # Use questionary for the actual selection.
-    choices = [t.name for t in TOOLS] + [_MOTIVATION_ACTION, "Quit"]
+    choices = [t.name for t in TOOLS] + [_VULN_MATRIX_ACTION,
+                                           _MOTIVATION_ACTION, "Quit"]
     pick = questionary.select(
         "Pick a tool:",
         choices=choices,
@@ -657,17 +739,48 @@ def show_tool_menu(console: Console) -> Tool | None | str:
         return None
     if pick == _MOTIVATION_ACTION:
         return _MOTIVATION_ACTION
+    if pick == _VULN_MATRIX_ACTION:
+        return _VULN_MATRIX_ACTION
     return next(t for t in TOOLS if t.name == pick)
 
 
 def show_tool_intro(console: Console, tool: Tool) -> None:
-    """Print the tool's description + lab URL before we prompt for args."""
+    """Print the tool's description + which vuln classes it targets + lab URL."""
     content = Text.assemble(tool.description)
+    if tool.vulnerabilities:
+        content.append("\n\nVulnerability classes this addresses:\n", style="primary")
+        for v in tool.vulnerabilities:
+            content.append(f"  •  {v}\n", style="success")
+        # trim trailing newline so the panel padding looks right
+        content.rstrip()
     if tool.lab_url:
-        content.append("\n\nTarget lab: ")
+        content.append("\nTarget lab: ")
         content.append(tool.lab_url, style="url")
     console.print(Panel(content, title=tool.name, border_style="primary",
                         padding=(1, 2)))
+
+
+def render_vuln_matrix(console: Console) -> None:
+    """Show the tool ↔ vulnerability-class mapping as one big table."""
+    console.print()
+    table = Table(
+        title="Tool → vulnerability-class mapping",
+        title_style="primary",
+        border_style="muted",
+        show_lines=True,
+    )
+    table.add_column("Tool", style="primary", no_wrap=True)
+    table.add_column("Vulnerability classes it targets", style="success")
+    for t in TOOLS:
+        vulns = "\n".join(f"• {v}" for v in t.vulnerabilities) if t.vulnerabilities \
+                else "(no specific vuln class - utility tool)"
+        table.add_row(t.name, vulns)
+    console.print(table)
+    console.print(
+        "[muted]Tip: 'when in doubt' picks are usually [primary]intruder[/primary] "
+        "(general fuzzer) for active probing and [primary]cheatsheet[/primary] "
+        "(this menu) for syntax reference.[/muted]"
+    )
 
 
 def collect_args(tool: Tool, q_style: QStyle) -> dict[str, str] | None:
@@ -1064,6 +1177,9 @@ def main():
             break
         if tool == _MOTIVATION_ACTION:
             render_motivation_full(console)
+            continue
+        if tool == _VULN_MATRIX_ACTION:
+            render_vuln_matrix(console)
             continue
 
         show_tool_intro(console, tool)

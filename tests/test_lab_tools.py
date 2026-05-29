@@ -18,6 +18,7 @@ import lab_tools
 from lab_tools import (
     TOOLS, THEMES, Tool, Prompt, build_command, check_paths, RuleTracker,
     parse_motivation, render_motivation_quote, render_motivation_full,
+    render_vuln_matrix,
 )
 
 
@@ -265,6 +266,35 @@ class TestRuleTracker:
         t.render(console)
         # Nothing recorded -> nothing rendered.
         assert console.file.getvalue() == ""
+
+
+class TestVulnerabilityMapping:
+    def test_every_tool_has_vulnerabilities(self):
+        # Cheatsheet's coverage is the catch-all entry ("ALL classes -
+        # reference for..."), so it counts. Every other tool should
+        # have at least one specific vuln-class entry.
+        for t in TOOLS:
+            assert t.vulnerabilities, \
+                f"tool {t.key!r} has no vulnerabilities listed"
+
+    def test_no_empty_strings_in_vuln_list(self):
+        for t in TOOLS:
+            for v in t.vulnerabilities:
+                assert v.strip(), f"{t.key}: empty string in vulnerabilities"
+
+    def test_render_vuln_matrix_does_not_crash(self):
+        import io
+        from rich.console import Console
+        # Render under each theme.
+        for theme_name in THEMES:
+            console = Console(theme=THEMES[theme_name], file=io.StringIO(),
+                                force_terminal=True, width=200)
+            render_vuln_matrix(console)
+            out = console.file.getvalue()
+            # Every tool name should appear in the rendered matrix.
+            for t in TOOLS:
+                assert t.name in out, \
+                    f"matrix missing tool {t.name!r} under theme {theme_name!r}"
 
 
 class TestParseMotivation:

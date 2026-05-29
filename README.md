@@ -39,6 +39,31 @@ python3 intruder.py req.txt --payload usernames.txt \
 
 If the server returns `401`, `403`, or `302 -> /login` mid-fuzz, the script automatically re-runs the login flow and retries the request. Lock-serialized across workers so concurrent failures don't stampede the login endpoint.
 
+## Which tool for which vulnerability?
+
+The same mapping is available inside the launcher (pick "Show tool → vulnerability matrix" in the menu).
+
+| Tool | Vulnerability classes it targets |
+|---|---|
+| [`intruder.py`](intruder.py) | SQLi (all flavors), XSS, path traversal, SSRF, command injection, SSTI, open redirect, auth brute force, web cache poisoning — any "swap X into position Y" attack |
+| [`workflow.py`](workflow.py) | Multi-step CSRF, cross-app SSRF, stateful auth flows (OAuth / 2FA / password reset), session-pinning traps, vulns requiring per-iteration state refresh |
+| [`privesc.py`](privesc.py) | IDOR / Broken Object-Level Authorization (BOLA), broken access control, privilege escalation (horizontal + vertical) |
+| [`param_miner.py`](param_miner.py) | Mass assignment, parameter pollution, hidden admin/debug functionality, prototype pollution entry points, HTTP method override |
+| [`dirbuster.py`](dirbuster.py) | Forced browsing, information disclosure (.git, .env, backup files), hidden API endpoints, source code exposure |
+| [`jwt_tool.py`](jwt_tool.py) | JWT attacks: alg=none variants, HS256 weak-secret brute, kid injection, algorithm confusion |
+| [`security_audit.py`](security_audit.py) | Missing security headers (CSP, HSTS, X-Frame-Options), insecure cookies (no HttpOnly/Secure/SameSite), tech-stack disclosure |
+| [`exploit_server.py`](exploit_server.py) | Stored / reflected XSS (cookie exfil), CSRF (host attacker's form), file-upload delivery, open-redirect landing pages |
+| [`oast_poll.py`](oast_poll.py) | Blind SSRF, blind SQLi, blind XXE, log4shell — anything that confirms via out-of-band callback |
+| [`response_diff.py`](response_diff.py) | Subtle response analysis after stripping dynamic noise (CSRF tokens, timestamps) — username enum subtle variant, cache-poisoning verification |
+| [`cyberchef.py`](cyberchef.py) | Token / cookie / payload analysis (encoding, hashing, JWT inspection, identify-what-is-this) |
+| [`decode_tool.py`](decode_tool.py) | Encoding/decoding chains, auto-detect what something is |
+| [`cheatsheet.py`](cheatsheet.py) | **Reference for ALL vuln classes** — SQLi, XSS, SSRF, JWT, SSTI, XXE, file upload, CSRF, NoSQLi, LDAP, race conditions, web cache poisoning, deserialization |
+| [`username_enum_solver.py`](username_enum_solver.py) | Username enumeration (response-content leak) |
+| [`subtle_response_solver.py`](subtle_response_solver.py) | Username enumeration (subtle 1-char delta) |
+| [`timing_attack_solver.py`](timing_attack_solver.py) | Username enumeration (response-time / timing oracle) |
+
+**When in doubt**, pick `intruder.py` (general fuzzer) for active probing and `cheatsheet.py` for syntax reference.
+
 ## Workflow directives at a glance
 
 | Directive | What it does | Example file |
