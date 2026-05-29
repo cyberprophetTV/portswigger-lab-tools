@@ -12,7 +12,7 @@ pytest.importorskip("rich")
 pytest.importorskip("questionary")
 
 from cyberchef import (
-    OPERATIONS, magic_decode, _looks_readable,
+    OPERATIONS, magic_decode, _looks_readable, show_state,
     op_to_base64, op_from_base64,
     op_to_base32, op_from_base32,
     op_to_url, op_from_url, op_to_double_url, op_from_double_url,
@@ -297,3 +297,52 @@ class TestMagic:
         candidates = magic_decode(token)
         names = [n for n, _ in candidates]
         assert "JWT decode" in names
+
+
+# ---------------------------------------------------------------------
+# TUI RENDER SMOKE TESTS
+# ---------------------------------------------------------------------
+# Regression for a real bug: show_state() called recipe_text.rstrip()
+# which mutates Text in place and returns None - Panel then crashed
+# with NotRenderableError. These tests render show_state to a buffer
+# under various recipe states so any future rendering bug surfaces
+# in CI instead of when the user fires up the TUI.
+class TestShowStateRender:
+    def _make_console(self):
+        """A buffer-backed Console that won't write to a real terminal."""
+        import io
+        from rich.console import Console
+        from cyberchef import THEME
+        return Console(theme=THEME, file=io.StringIO(),
+                        force_terminal=True, width=100, highlight=False)
+
+    def test_empty_recipe_renders(self):
+        c = self._make_console()
+        show_state(c, "hello", [])
+        out = c.file.getvalue()
+        assert "Current value" in out
+        assert "hello" in out
+
+    def test_recipe_with_one_step_renders(self):
+        c = self._make_console()
+        show_state(c, "YWRtaW4=", [("To Base64", {})])
+        out = c.file.getvalue()
+        assert "Recipe" in out
+        assert "To Base64" in out
+
+    def test_recipe_with_args_renders(self):
+        c = self._make_console()
+        # HMAC-SHA256 with a key arg - this is the path that uses
+        # the args dict in the recipe display.
+        show_state(c, "deadbeef", [("HMAC-SHA256", {"key": "secret"})])
+        out = c.file.getvalue()
+        assert "HMAC-SHA256" in out
+        assert "key=" in out
+
+    def test_long_value_truncated_in_display(self):
+        # Display truncation to DISPLAY_TRUNCATE - panel should still
+        # render without error even when the full value is huge.
+        c = self._make_console()
+        show_state(c, "x" * 10000, [])
+        out = c.file.getvalue()
+        assert "truncated" in out

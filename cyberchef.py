@@ -463,13 +463,17 @@ def show_state(console: Console, current: str, recipe: list[tuple[str, dict]]) -
     console.print(Panel(body, title=title, border_style="primary", padding=(1, 2)))
     # Recipe panel (if any operations have been applied)
     if recipe:
-        recipe_text = Text()
+        # Build the joined string first - avoids a trailing newline
+        # AND avoids Text.rstrip() which mutates in place and returns
+        # None (would crash Panel rendering).
+        recipe_lines = []
         for i, (name, args) in enumerate(recipe, start=1):
             args_str = ""
             if args:
                 args_str = " (" + ", ".join(f"{k}={v!r}" for k, v in args.items()) + ")"
-            recipe_text.append(f"{i:>2}. {name}{args_str}\n", style="recipe")
-        console.print(Panel(recipe_text.rstrip(), title="Recipe", border_style="accent"))
+            recipe_lines.append(f"{i:>2}. {name}{args_str}")
+        recipe_text = Text("\n".join(recipe_lines), style="recipe")
+        console.print(Panel(recipe_text, title="Recipe", border_style="accent"))
 
 
 def pick_operation(q_style) -> Operation | None:
