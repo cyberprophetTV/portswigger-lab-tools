@@ -1,0 +1,24 @@
+{
+  "_doc": "Demonstrates the `loop` directive. This workflow paginates through 10 pages of an API, exposing the current page number to the request as {{page}}. For until-condition variants ({until_status, until_extract}), see workflow-loop-retry.json.",
+
+  "vars": {
+    "base_url": "https://YOUR-LAB-ID.web-security-academy.net"
+  },
+
+  "steps": [
+    {
+      "name": "paginate_users",
+      "loop": {
+        "count": 10,
+        "var": "page"
+      },
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/users?page={{page}}&size=20"
+      },
+      "extract": {
+        "_": {"jsonpath": "$.total"}
+      }
+    }
+  ]
+}

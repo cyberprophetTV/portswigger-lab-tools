@@ -270,9 +270,11 @@ TOOLS: list[Tool] = [
         ),
         lab_url="https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-different-responses",
         prompts=[
-            Prompt("base_url",  "Lab URL (https://...web-security-academy.net)"),
-            Prompt("usernames", "Usernames wordlist path", default="usernames.txt", kind="path"),
-            Prompt("passwords", "Passwords wordlist path", default="passwords.txt", kind="path"),
+            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)"),
+            Prompt("usernames", "Usernames wordlist path  (one username per line, e.g. usernames.txt)",
+                   default="usernames.txt", kind="path"),
+            Prompt("passwords", "Passwords wordlist path  (one password per line, e.g. passwords.txt)",
+                   default="passwords.txt", kind="path"),
         ],
     ),
     Tool(
@@ -287,9 +289,11 @@ TOOLS: list[Tool] = [
         ),
         lab_url="https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-subtly-different-responses",
         prompts=[
-            Prompt("base_url",  "Lab URL"),
-            Prompt("usernames", "Usernames wordlist path", default="usernames.txt", kind="path"),
-            Prompt("passwords", "Passwords wordlist path", default="passwords.txt", kind="path"),
+            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)"),
+            Prompt("usernames", "Usernames wordlist path  (one username per line, e.g. usernames.txt)",
+                   default="usernames.txt", kind="path"),
+            Prompt("passwords", "Passwords wordlist path  (one password per line, e.g. passwords.txt)",
+                   default="passwords.txt", kind="path"),
         ],
     ),
     Tool(
@@ -305,10 +309,13 @@ TOOLS: list[Tool] = [
         ),
         lab_url="https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-response-timing",
         prompts=[
-            Prompt("base_url",  "Lab URL"),
-            Prompt("usernames", "Usernames wordlist path", default="usernames.txt", kind="path"),
-            Prompt("passwords", "Passwords wordlist path", default="passwords.txt", kind="path"),
-            Prompt("--samples", "Samples per candidate (more = slower, more reliable)", default="3"),
+            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)"),
+            Prompt("usernames", "Usernames wordlist path  (one username per line, e.g. usernames.txt)",
+                   default="usernames.txt", kind="path"),
+            Prompt("passwords", "Passwords wordlist path  (one password per line, e.g. passwords.txt)",
+                   default="passwords.txt", kind="path"),
+            Prompt("--samples", "Samples per candidate  (integer; more = slower + more reliable, e.g. 3, 5, 10)",
+                   default="3"),
         ],
     ),
     Tool(
@@ -325,7 +332,8 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("workflow_file", "Workflow JSON file",
+            Prompt("workflow_file", "Workflow JSON or YAML file  "
+                                    "(see examples/workflow-*.json for templates)",
                    default="examples/workflow-login-csrf-fuzz.json", kind="path"),
         ],
     ),
@@ -342,10 +350,15 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("url_list", "File with one URL per line", kind="path"),
-            Prompt("--admin-jar", "Admin cookie jar (JSON, blank to skip)",
+            Prompt("url_list", "File with one URL per line  "
+                                "(absolute URLs, e.g. urls.txt with lines like "
+                                "https://target/admin, https://target/api/users)",
+                   kind="path"),
+            Prompt("--admin-jar", "Admin cookie jar  (JSON file, blank to skip; "
+                                  "e.g. admin.json from `intruder --cookie-jar`)",
                    default="", kind="path", required=False),
-            Prompt("--user-jar",  "Low-priv cookie jar (JSON, blank to skip)",
+            Prompt("--user-jar",  "Low-priv cookie jar  (JSON file, blank to skip; "
+                                  "e.g. user.json)",
                    default="", kind="path", required=False),
         ],
     ),
@@ -361,7 +374,7 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("url", "Target URL"),
+            Prompt("url", "Target URL  (example: https://target.com/dashboard)"),
         ],
     ),
     Tool(
@@ -377,12 +390,14 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("request_file", "Raw HTTP request template (must include a POST body)",
+            Prompt("request_file", "Raw HTTP request template  "
+                                   "(must have a POST body; see examples/login.txt)",
                    default="examples/login.txt", kind="path"),
-            Prompt("--params", "Parameter wordlist",
+            Prompt("--params", "Parameter wordlist  (one param name per line; "
+                               "e.g. hidden-params.txt has admin, debug, role, ...)",
                    default="hidden-params.txt", kind="path"),
-            Prompt("--noise-tolerance", "Ignore length diffs within +/-N bytes "
-                                       "(useful for noisy responses)",
+            Prompt("--noise-tolerance", "Ignore length diffs within +/-N bytes  "
+                                       "(integer; e.g. 5 for noisy responses, 0 for strict)",
                    default="0", required=False),
         ],
     ),
@@ -400,10 +415,12 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("base_url", "Target base URL (https://...)"),
-            Prompt("wordlist", "Path wordlist (one path per line)",
+            Prompt("base_url", "Target base URL  (example: https://target.com)"),
+            Prompt("wordlist", "Path wordlist  (one path per line, no leading slash; "
+                               "e.g. common-paths.txt, SecLists raft-small-words.txt)",
                    default="common-paths.txt", kind="path"),
-            Prompt("--extensions", "Extensions to try (comma-separated, e.g. '.php,.bak')",
+            Prompt("--extensions", "Extensions to try, comma-separated  "
+                                   "(e.g. '.php,.bak,.zip' or blank to skip)",
                    default="", required=False),
         ],
     ),
@@ -420,15 +437,24 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("request_file", "Raw HTTP request template file",
+            Prompt("request_file", "Raw HTTP request template file  "
+                                   "(paste from Burp's Raw tab; mark payload positions "
+                                   "with §...§; see examples/login.txt)",
                    default="examples/login.txt", kind="path"),
-            Prompt("--payload",    "Payload wordlist path", default="usernames.txt", kind="path"),
-            Prompt("--mode",       "Attack mode", default="sniper",
-                   kind="select",
+            Prompt("--payload", "Payload wordlist path  "
+                                "(one payload per line; e.g. usernames.txt, "
+                                "your-sqli-list.txt, your-xss-list.txt)",
+                   default="usernames.txt", kind="path"),
+            Prompt("--mode", "Attack mode  "
+                             "(sniper = 1 marker at a time; cluster-bomb = cartesian product)",
+                   default="sniper", kind="select",
                    choices=["sniper", "battering-ram", "pitchfork", "cluster-bomb"]),
-            Prompt("--match-status", "Match status (e.g. '200', '!403'); blank = no filter",
+            Prompt("--match-status", "Match status  "
+                                     "(examples: '200', '200-299', '!403'; blank = no filter)",
                    default="", required=False),
-            Prompt("--match-length", "Match body length (e.g. '!3168'); blank = no filter",
+            Prompt("--match-length", "Match body length  "
+                                     "(examples: '!3168' = anything-but-3168, "
+                                     "'5000-' = 5000+; blank = no filter)",
                    default="", required=False),
         ],
     ),
@@ -617,7 +643,13 @@ def collect_args(tool: Tool, q_style: QStyle) -> dict[str, str] | None:
     # Final "extra args" prompt for power users. Accept any extra flags
     # they want to tack on - --proxy, --verbose, --workers, etc.
     extra = questionary.text(
-        "Extra args (optional, e.g. '--proxy burp --workers 5'):",
+        "Extra args (optional)  "
+        "examples: --proxy burp     (route through Burp at 127.0.0.1:8080)\n"
+        "          --workers 20     (more concurrent requests)\n"
+        "          --jitter 0.5-2   (random delay between requests)\n"
+        "          --max-rps 25     (proactive rate cap)\n"
+        "          --verbose        (print every probe + first-hit dump)\n"
+        "          --output out.json --output-html out.html",
         default="",
         qmark="›",
         style=q_style,

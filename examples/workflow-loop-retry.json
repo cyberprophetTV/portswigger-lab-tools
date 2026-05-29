@@ -1,0 +1,36 @@
+{
+  "_doc": "Demonstrates loop with an exit condition. Keeps retrying a flaky endpoint until it returns 200, capped at 5 attempts so we never spin forever. Also shows {until_extract} - loop until a regex extractor finally matches.",
+
+  "vars": {
+    "base_url": "https://YOUR-LAB-ID.web-security-academy.net"
+  },
+
+  "steps": [
+    {
+      "name": "retry_until_success",
+      "loop": {
+        "until_status": 200,
+        "max": 5
+      },
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/flaky-endpoint"
+      }
+    },
+
+    {
+      "name": "poll_for_async_token",
+      "loop": {
+        "until_extract": "auth_token",
+        "max": 10
+      },
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/auth/poll"
+      },
+      "extract": {
+        "auth_token": {"jsonpath": "$.token"}
+      }
+    }
+  ]
+}

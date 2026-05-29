@@ -39,6 +39,18 @@ python3 intruder.py req.txt --payload usernames.txt \
 
 If the server returns `401`, `403`, or `302 -> /login` mid-fuzz, the script automatically re-runs the login flow and retries the request. Lock-serialized across workers so concurrent failures don't stampede the login endpoint.
 
+## Workflow directives at a glance
+
+| Directive | What it does | Example file |
+|---|---|---|
+| `loop: {count: N}` | Run a step N times (index in `{{loop_index}}` or your `var`) | [`examples/workflow-loop-paginate.json`](examples/workflow-loop-paginate.json) |
+| `loop: {until_status: 200, max: 5}` | Retry until status matches, capped at `max` | [`examples/workflow-loop-retry.json`](examples/workflow-loop-retry.json) |
+| `loop: {until_extract: name, max: 10}` | Poll until an extractor finally hits | (in `workflow-loop-retry.json`) |
+| `if: "{{role}} == admin"` | Skip step if condition is false. Operators: `==` `!=` `>` `<` `>=` `<=` `!` (prefix) and bare truthy | [`examples/workflow-conditional.json`](examples/workflow-conditional.json) |
+| `include: "other.json"` | Pull another workflow in as a single step (shared session; final vars merge back) | [`examples/workflow-include-shared-auth.json`](examples/workflow-include-shared-auth.json) + [`auth-preamble.json`](examples/workflow-auth-preamble.json) |
+| YAML format | Same semantics as JSON, more readable for hand-editing (needs `pip install pyyaml`) | [`examples/workflow-yaml-readable.yaml`](examples/workflow-yaml-readable.yaml) |
+| `--watch` | Re-run automatically when the workflow file (or any include) is saved on disk. 1-second mtime polling | (any workflow file) |
+
 ## BSCP-style rate limit safety
 
 The exam (and most real-world labs) will IP-ban you if you fuzz too aggressively. `intruder.py` has two layers of rate-limit defense:

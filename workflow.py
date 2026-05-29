@@ -696,6 +696,109 @@ def parse_var(raw: str) -> tuple[str, str]:
     return name.strip(), value
 
 
+# ---------------------------------------------------------------------
+# --watch MODE: re-run the workflow when the file (or any included
+# file) changes on disk
+# ---------------------------------------------------------------------
+def collect_watched_paths(workflow: dict, base: Path) -> list[Path]:
+    """
+    Walk the workflow recursively and return every file path we should
+    watch: the workflow itself + any include: targets + the includes'
+    own includes.
+
+    Best-effort - if an include can't be loaded (missing / parse error)
+    we skip its descendants. Caller is expected to also add the
+    top-level workflow path.
+    """
+    paths: list[Path] = []
+    for step in workflow.get("steps", []):
+        if "include" in step:
+            inc_str = step["include"]
+            # Strip any {{vars}} from the include path - if it's dynamic,
+            # we can't know what to watch. Skip vars-bearing includes.
+            if "{{" in inc_str:
+                continue
+            inc_path = Path(inc_str)
+            if not inc_path.is_absolute():
+                inc_path = base / inc_path
+            if not inc_path.exists():
+                continue
+            paths.append(inc_path)
+            try:
+                sub = load_workflow_file(inc_path)
+                paths.extend(collect_watched_paths(sub, inc_path.parent))
+            except SystemExit:
+                # load_workflow_file calls sys.exit on parse error -
+                # in watch mode we don't want that to kill us.
+                continue
+    return paths
+
+
+def latest_mtime(paths: list[Path]) -> float:
+    """Most recent mtime across all paths. 0 if none exist."""
+    times = []
+    for p in paths:
+        try:
+            times.append(p.stat().st_mtime)
+        except FileNotFoundError:
+            continue
+    return max(times) if times else 0.0
+
+
+def watch_loop(workflow_path: Path, run_fn, poll_interval: float = 1.0):
+    """
+    Run the workflow once, then re-run whenever the workflow file
+    (or any of its includes) gets modified.
+
+    Polling approach (no inotify / watchdog dependency) - good enough
+    for human-paced editing. 1-second poll = at most 1s of latency
+    after you save.
+
+    Ctrl-C ends the loop cleanly.
+    """
+    # First pass to discover which files to monitor.
+    try:
+        wf = load_workflow_file(workflow_path)
+        watched = [workflow_path] + collect_watched_paths(wf, workflow_path.parent)
+    except SystemExit:
+        watched = [workflow_path]
+
+    print(f"{tag_info()} watch mode: monitoring {len(watched)} file(s) "
+          f"(poll every {poll_interval}s, Ctrl-C to exit)")
+    for p in watched:
+        print(f"   {dim(str(p))}")
+
+    last_mtime = 0.0
+    try:
+        while True:
+            current = latest_mtime(watched)
+            if current > last_mtime:
+                if last_mtime > 0:    # not the first run - show divider
+                    print()
+                    print(cyan("=" * 60))
+                    print(cyan(f"=== change detected, re-running ==="))
+                    print(cyan("=" * 60))
+                try:
+                    run_fn()
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    print(f"{tag_err()} workflow failed: {e}")
+                last_mtime = current
+                # Re-scan watched files - includes may have been
+                # added or removed by the edit.
+                try:
+                    wf = load_workflow_file(workflow_path)
+                    watched = [workflow_path] + collect_watched_paths(
+                        wf, workflow_path.parent)
+                except SystemExit:
+                    pass
+            time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        print()
+        print(f"{tag_info()} watch stopped")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -711,6 +814,15 @@ def main():
     ap.add_argument("--insecure", action="store_true")
     ap.add_argument("--output", type=Path, metavar="FILE.json",
                     help="Write summary (step statuses + fuzz hits) to this file")
+    ap.add_argument("--watch", action="store_true",
+                    help="Re-run the workflow whenever the file (or any "
+                         "include: file it references) changes on disk. "
+                         "Polls mtime every --watch-interval seconds. "
+                         "Useful for live-editing a workflow while watching "
+                         "results - save the file to trigger a fresh run.")
+    ap.add_argument("--watch-interval", type=float, default=1.0,
+                    metavar="SEC",
+                    help="Mtime poll interval in seconds (default 1.0).")
     args = ap.parse_args()
 
     if not args.workflow_file.exists():
@@ -733,19 +845,23 @@ def main():
         k, v = parse_var(raw)
         initial_vars[k] = v
 
-    # ONE session shared across the whole workflow. Cookies set during
-    # step 1 (login) are automatically attached to subsequent steps.
-    session = build_session(workers=4, proxy=proxy, insecure=insecure, retries=2)
+    def _run_once():
+        """One pass through the workflow. Reloads the file each time
+        so --watch picks up edits, and gets a fresh Session so cookies
+        from a previous run don't leak into the new one."""
+        wf = load_workflow_file(args.workflow_file)
+        session = build_session(workers=4, proxy=proxy, insecure=insecure, retries=2)
+        summary = run_workflow(wf, session, initial_vars, args.dry_run,
+                                _base_path=args.workflow_file.parent)
+        if args.output:
+            write_json([{"workflow_summary": summary}], args.output)
+            print(f"{tag_info()} wrote summary to {args.output}")
 
-    summary = run_workflow(workflow, session, initial_vars, args.dry_run,
-                            _base_path=args.workflow_file.parent)
+    if args.watch:
+        watch_loop(args.workflow_file, _run_once, args.watch_interval)
+        return 0
 
-    if args.output:
-        write_json([{"workflow_summary": summary}], args.output)
-        print(f"{tag_info()} wrote summary to {args.output}")
-
-    # Exit 0 if at least one step ran successfully AND no fuzz step
-    # ran with zero hits. Defensive default.
+    _run_once()
     return 0
 
 

@@ -1,0 +1,31 @@
+{
+  "_doc": "Demonstrates `include` for composing workflows. Pulls in workflow-auth-preamble.json to handle login + CSRF capture, then proceeds with what THIS workflow is actually about. Shared Session means cookies from the included workflow propagate to subsequent steps here, and any vars extracted (csrf) are merged back into our state.",
+
+  "vars": {
+    "base_url": "https://YOUR-LAB-ID.web-security-academy.net",
+    "user": "wiener",
+    "pass": "peter"
+  },
+
+  "steps": [
+    {
+      "name": "login_and_get_csrf",
+      "include": "workflow-auth-preamble.json"
+    },
+
+    {
+      "name": "now_do_the_real_attack",
+      "if": "{{csrf}}",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/my-account/change-email",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "csrf={{csrf}}&email=§EMAIL§"
+      },
+      "fuzz": {
+        "payload": "usernames.txt",
+        "match_status": "200"
+      }
+    }
+  ]
+}

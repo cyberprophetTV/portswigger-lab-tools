@@ -1,0 +1,66 @@
+{
+  "_doc": "Demonstrates `if` directive for conditional step execution. Logs in, checks the user's role, then takes different actions based on it. Supported operators in `if`: == != > < >= <= ! (negation prefix). Unresolved {{vars}} are treated as empty so 'if {{token}}' on a never-set var is False.",
+
+  "vars": {
+    "base_url": "https://YOUR-LAB-ID.web-security-academy.net"
+  },
+
+  "steps": [
+    {
+      "name": "login",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/login",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "username=wiener&password=peter"
+      }
+    },
+
+    {
+      "name": "check_role",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/my-account"
+      },
+      "extract": {
+        "role": {"regex": "role: (\\w+)"}
+      }
+    },
+
+    {
+      "name": "admin_only_step",
+      "if": "{{role}} == admin",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/admin"
+      }
+    },
+
+    {
+      "name": "regular_user_step",
+      "if": "{{role}} != admin",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/dashboard"
+      }
+    },
+
+    {
+      "name": "only_if_role_extracted_at_all",
+      "if": "{{role}}",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/profile"
+      }
+    },
+
+    {
+      "name": "fallback_when_role_unset",
+      "if": "!{{role}}",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/login-again"
+      }
+    }
+  ]
+}
