@@ -312,6 +312,21 @@ TOOLS: list[Tool] = [
         ],
     ),
     Tool(
+        key="security_audit",
+        name="Security audit (headers + cookies)",
+        script="security_audit.py",
+        description=(
+            "Passive analysis of a URL. Reports missing security headers "
+            "(CSP, HSTS, X-Frame-Options, etc.), insecure cookies "
+            "(no HttpOnly / Secure / SameSite), and tech-stack disclosure "
+            "(Server, X-Powered-By). One GET request; takes seconds."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("url", "Target URL"),
+        ],
+    ),
+    Tool(
         key="param_miner",
         name="Hidden parameter discovery (param miner)",
         script="param_miner.py",

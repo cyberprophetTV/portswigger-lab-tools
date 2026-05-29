@@ -804,6 +804,10 @@ def sniper(template: RawRequest, payloads: list[str]):
     For N markers and M payloads, this yields N*M requests. Each
     iteration sets exactly ONE marker to a payload value; the rest
     keep their literal text (the text between the §§).
+
+    Yields (label, request, [substituted_values]). The third element
+    is the actual payload values that went on the wire - used by the
+    reflection detector to scan the response for echoes.
     """
     n = template.marker_count()
     for pos in range(n):
@@ -813,7 +817,7 @@ def sniper(template: RawRequest, payloads: list[str]):
             subs: list[str | None] = [None] * n
             subs[pos] = p
             label = f"sniper pos={pos} value={p!r}"
-            yield label, template.substituted(subs)
+            yield label, template.substituted(subs), [p]
 
 
 def battering_ram(template: RawRequest, payloads: list[str]):
@@ -826,7 +830,7 @@ def battering_ram(template: RawRequest, payloads: list[str]):
     n = template.marker_count()
     for p in payloads:
         subs = [p] * n
-        yield f"ram value={p!r}", template.substituted(subs)
+        yield f"ram value={p!r}", template.substituted(subs), [p]
 
 
 def pitchfork(template: RawRequest, payload_sets: list[list[str]]):
@@ -847,7 +851,7 @@ def pitchfork(template: RawRequest, payload_sets: list[list[str]]):
     # the shortest list runs out.
     for combo in zip(*payload_sets):
         subs: list[str | None] = list(combo) + [None] * (n - len(combo))
-        yield f"pitchfork {combo}", template.substituted(subs)
+        yield f"pitchfork {combo}", template.substituted(subs), list(combo)
 
 
 def cluster_bomb(template: RawRequest, payload_sets: list[list[str]]):
@@ -865,7 +869,7 @@ def cluster_bomb(template: RawRequest, payload_sets: list[list[str]]):
 
     for combo in itertools.product(*payload_sets):
         subs: list[str | None] = list(combo) + [None] * (n - len(combo))
-        yield f"cluster {combo}", template.substituted(subs)
+        yield f"cluster {combo}", template.substituted(subs), list(combo)
 
 
 # =====================================================================
@@ -999,6 +1003,10 @@ class FuzzConfig:
     # Pre-captured cookies (from login flow / loaded jar / --cookie flags),
     # applied to every Session we build.
     cookies: dict[str, str] = field(default_factory=dict)
+    # If True, scan each response body for the substituted payload(s)
+    # and add a `reflected` field to the result. Useful for spotting
+    # XSS/SQLi reflection points.
+    detect_reflection: bool = False
 
 
 # =====================================================================
@@ -1070,17 +1078,17 @@ def fuzz(cfg: FuzzConfig) -> None:
     first_hit_dumped = False
 
     def worker(item):
-        label, req = item
+        label, req, payloads = item
         maybe_jitter(cfg.jitter)
         sess = (build_session(1, cfg.proxy, cfg.insecure, cfg.retries,
                               cookies=cfg.cookies)
                 if cfg.fresh_session else shared)
         try:
             r, elapsed = send(sess, req, host, scheme)
-            return label, req, r.status_code, len(r.content), r.text, elapsed, None
+            return label, req, payloads, r.status_code, len(r.content), r.text, elapsed, None
         except requests.exceptions.RequestException as e:
             # Connection errors, DNS failures, timeouts, etc.
-            return label, req, None, 0, "", 0.0, str(e)
+            return label, req, payloads, None, 0, "", 0.0, str(e)
 
     with ThreadPoolExecutor(max_workers=cfg.workers) as ex:
         futures = [ex.submit(worker, it) for it in iterations]
@@ -1089,7 +1097,17 @@ def fuzz(cfg: FuzzConfig) -> None:
         # requests) show progress instead of looking hung. The bar is
         # a no-op when tqdm isn't installed.
         for fut in progress(as_completed(futures), total=len(futures), desc=cfg.mode):
-            label, req, status, length, body, elapsed, err = fut.result()
+            label, req, payloads, status, length, body, elapsed, err = fut.result()
+
+            # Reflection detection: does any of the substituted payload
+            # values appear verbatim in the response body? Skip empty
+            # / very-short payloads (would false-positive constantly).
+            reflected = False
+            if cfg.detect_reflection and body:
+                for p in payloads:
+                    if p and len(p) >= 3 and p in body:
+                        reflected = True
+                        break
 
             if err:
                 hit = False
@@ -1101,7 +1119,9 @@ def fuzz(cfg: FuzzConfig) -> None:
                 #   - only hits if matchers configured and not verbose
                 if hit or cfg.verbose or not cfg.matcher.any_enabled():
                     flag = tag_hit() if hit else tag_miss()
-                    print(f"{flag} {label}  status={status} len={length} time={elapsed:.2f}s")
+                    refl = "  REFLECTED" if reflected else ""
+                    print(f"{flag} {label}  status={status} len={length} "
+                          f"time={elapsed:.2f}s{refl}")
 
                 # Dump full first hit when --verbose: invaluable for
                 # spotting "oh I substituted in the wrong place" bugs.
@@ -1113,15 +1133,19 @@ def fuzz(cfg: FuzzConfig) -> None:
                     print("    --- end ---")
                     first_hit_dumped = True
 
-            if cfg.output is not None:
-                results.append({
+            if cfg.output is not None or cfg.output_csv is not None or \
+               cfg.output_html is not None or cfg.output_md is not None:
+                entry = {
                     "label": label,
                     "status": status,
                     "length": length,
                     "time": round(elapsed, 4),
                     "error": err,
                     "hit": hit,
-                })
+                }
+                if cfg.detect_reflection:
+                    entry["reflected"] = reflected
+                results.append(entry)
 
     # ---- write any enabled output format(s) ----
     n_hits = sum(1 for r in results if r["hit"])
@@ -1188,6 +1212,11 @@ def main():
                     help="GitHub-flavored Markdown table")
     ap.add_argument("--verbose", action="store_true",
                     help="Print every result; dump first-hit request + body")
+    ap.add_argument("--detect-reflection", action="store_true",
+                    help="Scan each response body for the substituted payload "
+                         "value(s). Any reflection is a strong XSS / SQLi hint "
+                         "and gets a REFLECTED marker on the output line + "
+                         "a `reflected` field in the JSON/CSV output.")
     # ---- Stealth / session (same set as username_enum_solver.py) ----
     ap.add_argument("--workers", type=int, default=10,
                     help="Concurrent requests (default 10)")
@@ -1327,6 +1356,7 @@ def main():
         output_html=args.output_html,
         output_md=args.output_md,
         cookies=cookies,
+        detect_reflection=args.detect_reflection,
     )
 
     fuzz(cfg)

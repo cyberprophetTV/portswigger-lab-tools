@@ -240,14 +240,21 @@ class TestSniper:
         results = list(sniper(two_marker_req, ["a", "b", "c"]))
         assert len(results) == 6
 
+    def test_yields_three_tuples(self, two_marker_req):
+        # (label, request, payloads) - third element is what enables
+        # reflection detection downstream.
+        results = list(sniper(two_marker_req, ["a"]))
+        assert len(results[0]) == 3
+        label, req, payloads = results[0]
+        assert isinstance(payloads, list)
+        assert payloads == ["a"]
+
     def test_one_marker_at_a_time(self, two_marker_req):
         # Iteration 0 (pos=0, value="a") -> "u=a&p=P" (P is literal fallback)
         results = list(sniper(two_marker_req, ["a"]))
         assert results[0][1].body == "u=a&p=P"   # pos 0 substituted
-        results = list(sniper(two_marker_req, ["b"]))
-        # With one payload, pos=1 iteration gives "u=U&p=b"
-        # (sniper iterates pos 0 first, then pos 1)
-        bodies = [sub.body for label, sub in sniper(two_marker_req, ["x"])]
+        # With one payload, pos=1 iteration gives "u=U&p=x"
+        bodies = [sub.body for label, sub, payloads in sniper(two_marker_req, ["x"])]
         assert "u=x&p=P" in bodies
         assert "u=U&p=x" in bodies
 
@@ -262,6 +269,12 @@ class TestBatteringRam:
         results = list(battering_ram(two_marker_req, ["a", "b", "c"]))
         assert len(results) == 3
 
+    def test_payloads_in_third_element(self, two_marker_req):
+        # battering ram fills every marker with the same payload, so
+        # the payloads list is [p] (just one entry, the value used).
+        label, req, payloads = list(battering_ram(two_marker_req, ["xx"]))[0]
+        assert payloads == ["xx"]
+
 
 class TestPitchfork:
     def test_parallel_iteration(self, two_marker_req):
@@ -275,13 +288,24 @@ class TestPitchfork:
         results = list(pitchfork(two_marker_req, [["a", "b", "c"], ["x", "y"]]))
         assert len(results) == 2
 
+    def test_payloads_in_third_element(self, two_marker_req):
+        label, req, payloads = list(pitchfork(two_marker_req,
+                                              [["u1"], ["p1"]]))[0]
+        assert payloads == ["u1", "p1"]
+
 
 class TestClusterBomb:
     def test_cartesian_product(self, two_marker_req):
         results = list(cluster_bomb(two_marker_req, [["u1", "u2"], ["p1", "p2"]]))
         assert len(results) == 4
-        bodies = sorted(sub.body for _, sub in results)
+        bodies = sorted(sub.body for _, sub, _ in results)
         assert bodies == ["u=u1&p=p1", "u=u1&p=p2", "u=u2&p=p1", "u=u2&p=p2"]
+
+    def test_payloads_in_third_element(self, two_marker_req):
+        # First combo for cluster_bomb is (u1, p1) by itertools.product.
+        label, req, payloads = list(cluster_bomb(two_marker_req,
+                                                  [["u1"], ["p1"]]))[0]
+        assert payloads == ["u1", "p1"]
 
 
 # ---------------------------------------------------------------------

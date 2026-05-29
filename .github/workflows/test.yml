@@ -37,6 +37,9 @@ jobs:
           python3 timing_attack_solver.py --help > /dev/null
           python3 dirbuster.py --help > /dev/null
           python3 param_miner.py --help > /dev/null
+          python3 jwt_tool.py --help > /dev/null
+          python3 jwt_tool.py decode --help > /dev/null
+          python3 security_audit.py --help > /dev/null
 
       - name: Smoke-test lab_tools imports
         # Can't actually run lab_tools in CI (interactive prompts),

@@ -25,6 +25,9 @@ If you'd rather use the CLI directly, every tool is self-contained and runs on `
 | [`timing_attack_solver.py`](timing_attack_solver.py) | Detects valid usernames by mean response time; long junk password + per-request X-Forwarded-For rotation | [Username enum via response timing](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-response-timing) |
 | [`intruder.py`](intruder.py) | General-purpose Burp-Intruder-style fuzzer (Sniper / Battering Ram / Pitchfork / Cluster Bomb), matchers, payload encoders, JSON/CSV/HTML/MD output, auth via `--login-url` or cookie jar | Anything you can express as a request template + payload list |
 | [`dirbuster.py`](dirbuster.py) | Content discovery / path enumeration. Extension fuzzing (`.php`, `.bak`, ...), recursive descent into discovered directories, same auth + proxy + output options as intruder | Any web target (use `common-paths.txt` to start; swap in [SecLists](https://github.com/danielmiessler/SecLists) for serious work) |
+| [`param_miner.py`](param_miner.py) | Discover hidden admin/debug parameters that don't appear in browser traffic (admin, debug, role, isAdmin, ...). Handles URL-encoded and JSON bodies; compares each variant against a noise-aware baseline | BSCP-style hidden-parameter labs and real apps with undocumented backdoors |
+| [`security_audit.py`](security_audit.py) | One-GET passive audit: missing CSP/HSTS/X-Frame-Options/etc., cookies lacking HttpOnly/Secure/SameSite, tech-stack disclosure headers | Any URL, including post-auth pages with `--cookie-jar` |
+| [`jwt_tool.py`](jwt_tool.py) | JWT analyzer with attack helpers: `decode` (with security observations), `none` (alg=none forgery in three casings), `brute` (HS256 wordlist attack), `sign` (re-sign with known secret), `kid` (kid-header injection variants). CLI subcommands only — not in the launcher menu. | Any JWT-using lab |
 
 ## Disclaimer — Educational use only
 
