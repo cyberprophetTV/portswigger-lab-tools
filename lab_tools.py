@@ -312,6 +312,27 @@ TOOLS: list[Tool] = [
         ],
     ),
     Tool(
+        key="dirbuster",
+        name="Content discovery (dirbusting)",
+        script="dirbuster.py",
+        description=(
+            "Find hidden endpoints by trying every path in a wordlist "
+            "and flagging the ones the server actually serves. Default "
+            "interesting statuses: 200/301/302/401/403/500. Supports "
+            "extension fuzzing (.php/.bak/.zip), recursion into "
+            "discovered directories, and the same auth + proxy + "
+            "output-format options as intruder."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("base_url", "Target base URL (https://...)"),
+            Prompt("wordlist", "Path wordlist (one path per line)",
+                   default="common-paths.txt", kind="path"),
+            Prompt("--extensions", "Extensions to try (comma-separated, e.g. '.php,.bak')",
+                   default="", required=False),
+        ],
+    ),
+    Tool(
         key="intruder",
         name="Intruder (general-purpose fuzzer)",
         script="intruder.py",

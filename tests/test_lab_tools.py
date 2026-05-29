@@ -181,15 +181,17 @@ class TestCheckPaths:
         )
         assert check_paths(tool, {}) == []
 
-    def test_every_intruder_example_exists(self):
-        # Sanity check that the bundled examples are all really there
-        # (catches "I added a Prompt default but forgot to commit the
-        # example file" mistakes).
-        intruder = next(t for t in TOOLS if t.key == "intruder")
-        for p in intruder.prompts:
-            if p.kind == "path" and p.default:
-                path = Path(__file__).parent.parent / p.default
-                assert path.exists(), f"missing default file: {p.default}"
+    def test_every_default_file_exists(self):
+        # Sanity check across EVERY tool: any path-kind prompt with a
+        # default value must point at a file that's actually in the
+        # repo. Catches "I added a Prompt default but forgot to commit
+        # the file" mistakes for ALL tools, not just intruder.
+        for t in TOOLS:
+            for p in t.prompts:
+                if p.kind == "path" and p.default:
+                    path = Path(__file__).parent.parent / p.default
+                    assert path.exists(), \
+                        f"tool {t.key!r}: missing default file {p.default!r}"
 
 
 class TestBannerRender:

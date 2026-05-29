@@ -23,7 +23,8 @@ If you'd rather use the CLI directly, every tool is self-contained and runs on `
 | [`username_enum_solver.py`](username_enum_solver.py) | Two-phase username + password attack against an obvious-response leak | [Username enum via different responses](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-different-responses) |
 | [`subtle_response_solver.py`](subtle_response_solver.py) | Same idea but for the ~1-char-difference variant; uses `difflib.SequenceMatcher` + body canonicalization | [Username enum via subtly different responses](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-subtly-different-responses) |
 | [`timing_attack_solver.py`](timing_attack_solver.py) | Detects valid usernames by mean response time; long junk password + per-request X-Forwarded-For rotation | [Username enum via response timing](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-response-timing) |
-| [`intruder.py`](intruder.py) | General-purpose Burp-Intruder-style fuzzer (Sniper / Battering Ram / Pitchfork / Cluster Bomb), matchers, JSON output | Anything you can express as a request template + payload list |
+| [`intruder.py`](intruder.py) | General-purpose Burp-Intruder-style fuzzer (Sniper / Battering Ram / Pitchfork / Cluster Bomb), matchers, payload encoders, JSON/CSV/HTML/MD output, auth via `--login-url` or cookie jar | Anything you can express as a request template + payload list |
+| [`dirbuster.py`](dirbuster.py) | Content discovery / path enumeration. Extension fuzzing (`.php`, `.bak`, ...), recursive descent into discovered directories, same auth + proxy + output options as intruder | Any web target (use `common-paths.txt` to start; swap in [SecLists](https://github.com/danielmiessler/SecLists) for serious work) |
 
 ## Disclaimer — Educational use only
 
