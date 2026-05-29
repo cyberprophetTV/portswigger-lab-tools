@@ -1,0 +1,59 @@
+# Why I'm doing this  (Brain Unloader)
+#
+# Copy this file to ~/.config/bscp-tools/motivation.md OR ./motivation.md
+# and edit it with YOUR reasons. The launcher reads it and:
+#   - Shows ONE random quote at startup (between banner and theme picker).
+#   - Shows another one when the rule tracker says you're stuck.
+#   - Lets you view the full file via the `motivation` command in the menu.
+#
+# Rules for the parser:
+#   - Lines starting with `#` are comments (ignored).
+#   - Lines starting with `##` are SECTION HEADERS (rendered but not quoted).
+#   - Blank lines separate quotes; a "quote" is one or more consecutive
+#     non-empty non-comment non-header lines.
+#   - Lines starting with `-` are bullet items - parsed as separate quotes.
+#
+# Why this works: externalizing your motivation means the system reminds
+# you when you're flagging. It's harder to get stuck on a single tool
+# for 30 minutes when a quiet line at the top of the screen says
+# "every minute on this counts toward your $X-an-hour job offer."
+
+## My goal
+
+I'm earning the BSCP certification because I want to move from
+[your current role] into web application security as a paid pentester.
+
+## Why this matters
+
+- I'm done with [thing about current role that frustrates me].
+- The salary difference is roughly $[number] - it changes everything
+  for [family / kids / debt / life situation].
+- The cert is a CONCRETE thing I can hand a hiring manager that
+  proves I can do the work, not just talk about it.
+- The skills are transferable - if pentesting doesn't pan out,
+  these same skills open doors at AppSec engineer roles.
+
+## When I'm stuck, remember
+
+- I've passed harder things before.  ([list one])
+- Every lab I solve is one step closer.
+- Going slow on one tool ISN'T thoroughness - it's avoidance of
+  the hard "what's my next hypothesis?" question.
+- The exam doesn't reward effort. It rewards FINDING the bug.
+  If 15 minutes haven't found it, switch angle, don't dig deeper.
+- I CAN ask for help. PortSwigger's solutions page exists. Using
+  it for ONE step is not failure - failing the whole exam is failure.
+
+## Small wins to remember
+
+- [list a recent thing you figured out]
+- [list another]
+- [list another]
+
+## The version of me I'm building
+
+- Can read a Burp response and INSTANTLY see what's worth probing.
+- Can write a fuzzing script before considering doing it manually.
+- Can sit down with a target and have a plan in 10 minutes, not 60.
+- Can recognize a vuln class from the SHAPE of an endpoint without
+  reading the source.

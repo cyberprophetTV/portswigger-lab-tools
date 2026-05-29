@@ -311,6 +311,25 @@ python3 intruder.py req.txt --payload path-traversal-payloads.txt \
 
 See [`examples/workflow-identity-switch.json`](../examples/workflow-identity-switch.json) for the canonical login-A → clear → login-B chain.
 
+### 8a. Brain Unloader (motivation file)
+
+> *Externalize your "why I'm doing this." The exam is grueling; the rule tracker tells you you're stuck but doesn't remind you why finishing matters.*
+
+Create a markdown file at any of these paths:
+- `./motivation.md` (project-local)
+- `~/.config/bscp-tools/motivation.md`
+- `~/.brain-unloader.md`
+- whatever you set in `$BSCP_MOTIVATION_FILE`
+
+Use [`motivation.md.template`](../motivation.md.template) as a starting point — sections for `## My goal`, `## Why this matters`, `## When I'm stuck, remember`, `## Small wins`, `## The version of me I'm building`.
+
+The launcher shows:
+- One random quote at startup (under the banner)
+- Another one IN the stuck-time warning panel
+- Full file via the `Show motivation (Brain Unloader)` menu entry
+
+Lines starting with `#` are ignored (doc comments). `[bracketed placeholders]` from the template are filtered out so an unedited copy doesn't surface its TODOs.
+
 ### 8. The "don't get stuck" rule (built into the launcher)
 
 > *BSCP rule #1: if you've been on one approach for 10+ minutes without progress, you're wasting exam time. Switch angles — different tool, different payload class, different vulnerability hypothesis.*

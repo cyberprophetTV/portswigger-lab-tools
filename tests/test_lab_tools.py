@@ -17,6 +17,7 @@ pytest.importorskip("questionary")
 import lab_tools
 from lab_tools import (
     TOOLS, THEMES, Tool, Prompt, build_command, check_paths, RuleTracker,
+    parse_motivation, render_motivation_quote, render_motivation_full,
 )
 
 
@@ -41,9 +42,17 @@ class TestToolCatalog:
         for t in TOOLS:
             assert len(t.description) > 20, f"description too short for {t.key!r}"
 
-    def test_every_tool_has_at_least_one_prompt(self):
+    def test_every_tool_has_prompts_or_is_pure_tui(self):
+        # Most tools take CLI args -> need prompts. But a few are
+        # pure-TUI launchers (cheatsheet) that take no args at all;
+        # those legitimately have empty prompts.
+        pure_tui_keys = {"cheatsheet"}
         for t in TOOLS:
-            assert len(t.prompts) > 0
+            if t.key in pure_tui_keys:
+                continue
+            assert len(t.prompts) > 0, \
+                f"non-TUI tool {t.key!r} has no prompts - " \
+                "did you forget to add them?"
 
 
 class TestThemes:
@@ -256,6 +265,112 @@ class TestRuleTracker:
         t.render(console)
         # Nothing recorded -> nothing rendered.
         assert console.file.getvalue() == ""
+
+
+class TestParseMotivation:
+    def test_basic_paragraph(self):
+        text = "I'm earning BSCP to land an AppSec job."
+        assert parse_motivation(text) == [
+            "I'm earning BSCP to land an AppSec job."
+        ]
+
+    def test_bullet_per_quote(self):
+        text = (
+            "- I've passed harder things before.\n"
+            "- Every solved lab is one step closer.\n"
+            "- 15 min stuck = switch angle, don't dig.\n"
+        )
+        quotes = parse_motivation(text)
+        assert len(quotes) == 3
+        assert "I've passed harder things before." in quotes
+
+    def test_ignores_comments(self):
+        # `# ...` lines are doc comments, not motivation.
+        text = (
+            "# This is a doc comment, do not show.\n"
+            "Real reason: change my career.\n"
+            "# Another comment.\n"
+        )
+        quotes = parse_motivation(text)
+        assert quotes == ["Real reason: change my career."]
+
+    def test_ignores_section_headers(self):
+        # `## ...` are section headers (rendered separately in full view).
+        text = (
+            "## My goal\n"
+            "Pass BSCP and get hired.\n"
+            "## When stuck\n"
+            "- Switch angle.\n"
+        )
+        quotes = parse_motivation(text)
+        assert "Pass BSCP and get hired." in quotes
+        assert "Switch angle." in quotes
+        # The header itself isn't quoted.
+        assert "## My goal" not in quotes
+        assert "My goal" not in quotes
+
+    def test_multiline_paragraph_joined(self):
+        text = (
+            "The cert is a CONCRETE thing I can hand a hiring manager\n"
+            "that proves I can do the work, not just talk about it.\n"
+        )
+        quotes = parse_motivation(text)
+        assert len(quotes) == 1
+        # Joined with spaces (no double-space, no newline preserved).
+        assert "hiring manager that proves" in quotes[0]
+
+    def test_blank_lines_separate_paragraphs(self):
+        text = "First paragraph.\n\nSecond paragraph.\n"
+        quotes = parse_motivation(text)
+        assert quotes == ["First paragraph.", "Second paragraph."]
+
+    def test_template_placeholders_filtered_out(self):
+        # `[fill me in]` style placeholders are dropped so an unedited
+        # template doesn't surface its TODOs.
+        text = (
+            "- [your current role]\n"
+            "- [list one specific thing]\n"
+            "- This is a real motivation that should survive.\n"
+        )
+        quotes = parse_motivation(text)
+        assert quotes == ["This is a real motivation that should survive."]
+
+    def test_short_lines_filtered_out(self):
+        # 5-character "yes" or "no" lines aren't really motivation -
+        # the parser drops anything < 6 chars to avoid noise.
+        text = "- yes\n- This one is long enough to count.\n"
+        quotes = parse_motivation(text)
+        assert "yes" not in quotes
+        assert "This one is long enough to count." in quotes
+
+    def test_empty_file_returns_empty_list(self):
+        assert parse_motivation("") == []
+        assert parse_motivation("\n\n  \n") == []
+
+    def test_only_comments_returns_empty(self):
+        text = "# All comments.\n# Nothing real.\n## Just a header\n"
+        assert parse_motivation(text) == []
+
+
+class TestMotivationRender:
+    def _console(self):
+        import io
+        from rich.console import Console
+        return Console(theme=THEMES["neon"], file=io.StringIO(),
+                        force_terminal=True, width=100)
+
+    def test_render_quote_with_empty_list_is_noop(self):
+        # Don't print an empty panel when there's no motivation set up.
+        c = self._console()
+        render_motivation_quote(c, [])
+        assert c.file.getvalue() == ""
+
+    def test_render_quote_with_one_quote_prints_panel(self):
+        c = self._console()
+        render_motivation_quote(c, ["The reason matters."])
+        out = c.file.getvalue()
+        assert "The reason matters." in out
+        assert "why I'm doing this" in out
 
 
 class TestBannerRender:

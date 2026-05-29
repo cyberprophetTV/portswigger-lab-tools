@@ -623,8 +623,15 @@ def make_console(theme_name: str) -> Console:
     return Console(theme=THEMES[theme_name], highlight=False)
 
 
-def show_tool_menu(console: Console) -> Tool | None:
-    """Present the main menu of tools + 'Quit'. Returns the chosen Tool, or None to quit."""
+_MOTIVATION_ACTION = "Show motivation (Brain Unloader)"
+
+
+def show_tool_menu(console: Console) -> Tool | None | str:
+    """
+    Present the main menu of tools + 'Quit'. Returns the chosen Tool,
+    None to quit, or the literal string _MOTIVATION_ACTION when the
+    user wants to view the Brain Unloader.
+    """
     console.print()
     console.print("[primary]Available tools[/primary]")
 
@@ -639,16 +646,17 @@ def show_tool_menu(console: Console) -> Tool | None:
         table.add_row(str(i), t.name, t.script)
     console.print(table)
 
-    # Use questionary for the actual selection. The choices are the
-    # tool names plus a "Quit" sentinel.
-    choices = [t.name for t in TOOLS] + ["Quit"]
+    # Use questionary for the actual selection.
+    choices = [t.name for t in TOOLS] + [_MOTIVATION_ACTION, "Quit"]
     pick = questionary.select(
         "Pick a tool:",
         choices=choices,
-        qmark="›",
+        qmark="",
     ).ask()
     if pick is None or pick == "Quit":
         return None
+    if pick == _MOTIVATION_ACTION:
+        return _MOTIVATION_ACTION
     return next(t for t in TOOLS if t.name == pick)
 
 
@@ -777,6 +785,140 @@ def build_command(tool: Tool, answers: dict[str, str]) -> list[str]:
 
 
 # =====================================================================
+# BRAIN UNLOADER - personal motivation reminders
+# =====================================================================
+# Loads a markdown file the user writes (their "why I'm doing this")
+# and surfaces it in three places:
+#   - one random quote at startup, under the banner
+#   - one random quote in the rule-tracker "you're stuck" warning
+#   - the full file via the `motivation` menu entry
+#
+# Looked-for paths (first match wins):
+#   1. $BSCP_MOTIVATION_FILE  (env override)
+#   2. ./motivation.md        (project-local)
+#   3. ~/.config/bscp-tools/motivation.md
+#   4. ~/.brain-unloader.md   (legacy/fallback location)
+#
+# Missing file = feature silently off. No nagging to set it up.
+# Template file shipped at motivation.md.template if the user wants
+# a starting structure.
+
+import random as _random_motivation
+
+
+def _find_motivation_file() -> Path | None:
+    """Walk the known locations; return the first existing file."""
+    candidates = []
+    env = os.environ.get("BSCP_MOTIVATION_FILE")
+    if env:
+        candidates.append(Path(env).expanduser())
+    candidates.extend([
+        Path("./motivation.md"),
+        Path.home() / ".config" / "bscp-tools" / "motivation.md",
+        Path.home() / ".brain-unloader.md",
+    ])
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def parse_motivation(text: str) -> list[str]:
+    """
+    Extract "quotes" from a motivation markdown file.
+
+    A quote is one of:
+      - a single bullet line starting with '-' (the '- ' stripped)
+      - a paragraph (consecutive non-empty, non-comment, non-header lines)
+
+    Ignored:
+      - lines starting with '#' (Markdown comments / our doc comments)
+      - lines starting with '##' (section headers - rendered separately
+        when the full file is shown)
+      - blank lines (paragraph separators)
+    """
+    quotes: list[str] = []
+    paragraph: list[str] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        # Comment / header / blank handling
+        if not line or line.lstrip().startswith("#"):
+            if paragraph:
+                quotes.append(" ".join(paragraph).strip())
+                paragraph = []
+            continue
+        # Bullet item: emit as its own quote.
+        stripped = line.lstrip()
+        if stripped.startswith("- "):
+            if paragraph:
+                quotes.append(" ".join(paragraph).strip())
+                paragraph = []
+            bullet = stripped[2:].strip()
+            if bullet:
+                quotes.append(bullet)
+            continue
+        paragraph.append(stripped)
+    if paragraph:
+        quotes.append(" ".join(paragraph).strip())
+    # Drop quotes that are just placeholders like "[your current role]"
+    # so an unedited template doesn't surface its squiggly-bracket TODOs.
+    return [q for q in quotes if not (q.startswith("[") and q.endswith("]"))
+            and len(q) > 5]
+
+
+def load_motivation_quotes() -> list[str]:
+    """Find the motivation file (if any), parse it, return quote list."""
+    path = _find_motivation_file()
+    if path is None:
+        return []
+    try:
+        return parse_motivation(path.read_text(errors="replace"))
+    except OSError:
+        return []
+
+
+def render_motivation_quote(console: Console, quotes: list[str]) -> None:
+    """Pick one quote at random + render as a small unobtrusive panel."""
+    if not quotes:
+        return
+    quote = _random_motivation.choice(quotes)
+    console.print(Panel(
+        Text(quote, style="accent"),
+        title="why I'm doing this",
+        title_align="left",
+        border_style="muted",
+        padding=(0, 2),
+    ))
+
+
+def render_motivation_full(console: Console) -> None:
+    """Show the entire motivation file in a panel - the `motivation` menu cmd."""
+    path = _find_motivation_file()
+    if path is None:
+        console.print(Panel(
+            Text.assemble(
+                ("No motivation file found.\n\n", "warning"),
+                ("Create one at any of:\n", "muted"),
+                "  - ./motivation.md\n",
+                "  - ~/.config/bscp-tools/motivation.md\n",
+                "  - ~/.brain-unloader.md\n\n",
+                "Or set $BSCP_MOTIVATION_FILE to your own path.\n\n",
+                ("See motivation.md.template in this repo for a starter.",
+                 "muted"),
+            ),
+            title="Brain Unloader",
+            border_style="warning",
+            padding=(1, 2),
+        ))
+        return
+    body = Text(path.read_text(errors="replace"))
+    console.print(Panel(body,
+                          title=f"Brain Unloader  ·  {path}",
+                          border_style="primary",
+                          padding=(1, 2)))
+
+
+# =====================================================================
 # RULE TRACKER - per-tool elapsed-time tracking with "don't get stuck" alerts
 # =====================================================================
 # The #1 BSCP rule is "don't get stuck on one approach for too long."
@@ -879,12 +1021,21 @@ def main():
     args = ap.parse_args()
     tracker = RuleTracker(time_limit_minutes=args.time_limit)
 
+    # Load motivation quotes ONCE at startup so we can sprinkle them
+    # at strategic moments without re-reading the file every time.
+    motivation_quotes = load_motivation_quotes()
+
     # We need SOME theme loaded from the start because the banner and
     # the theme-picker prompt themselves use style names like [primary]
     # and [warning] that only resolve once a theme is active. Default
     # to "neon" for the pre-pick UI; the user can switch in the picker.
     console = make_console("neon")
     show_banner(console)
+
+    # One motivation quote right under the banner. Silent if no
+    # motivation file exists - users who haven't set it up never see
+    # the feature at all.
+    render_motivation_quote(console, motivation_quotes)
 
     if not show_disclaimer_acceptance(console):
         console.print("[error]Declined. Exiting.[/error]")
@@ -911,6 +1062,9 @@ def main():
         if tool is None:
             console.print("[muted]bye[/muted]")
             break
+        if tool == _MOTIVATION_ACTION:
+            render_motivation_full(console)
+            continue
 
         show_tool_intro(console, tool)
 
@@ -932,6 +1086,9 @@ def main():
                 border_style="error",
                 padding=(1, 2),
             ))
+            # Pair the warning with a motivation quote - "WHY" is more
+            # persuasive than "rule" when you're frustrated.
+            render_motivation_quote(console, motivation_quotes)
 
         # Sanity check: does the script we're about to invoke even exist?
         script_path = Path(__file__).parent / tool.script
