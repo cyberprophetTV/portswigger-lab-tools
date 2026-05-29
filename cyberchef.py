@@ -723,16 +723,21 @@ def tui_loop(initial: str):
         show_state(console, current, recipe)
 
         # ONE prompt for everything. Autocomplete suggests as you type
-        # so you don't have to remember exact names; meta=False lets
-        # the user type ANYTHING (including unrecognized strings -
-        # we handle those gracefully below).
+        # so you don't have to remember exact names; we validate in
+        # code below so unrecognized input gets a friendly error
+        # rather than blocking the user.
+        #
+        # Prompt text spells out exactly what's expected - earlier
+        # the prompt was "› cyberchef >" which read as gibberish to
+        # anyone who hadn't seen a REPL prompt before.
         cmd = questionary.autocomplete(
-            "› cyberchef >",
+            "What do you want to do?  (type an alias, op name, or command — "
+            "try `help` if you're stuck, `q` to quit):",
             choices=completer_choices,
             meta_information={c: "" for c in completer_choices},
             ignore_case=True,
             match_middle=True,
-            validate=lambda x: True,    # anything goes; we validate in code
+            validate=lambda x: True,
             style=q_style,
         ).ask()
 
