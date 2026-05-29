@@ -142,7 +142,7 @@ ngrok's free tier now requires signup + auth-token configuration, and tunnels di
 
 ---
 
-## Three exam pitfalls that get most people stuck
+## Seven exam pitfalls that get most people stuck
 
 These mirror what experienced BSCP takers warn about. Each maps to a specific tool in this repo.
 
@@ -209,6 +209,79 @@ python3 jwt_tool.py none '<TOKEN>' --set role=admin --set sub=admin
 ```
 
 Submit each, in order, in Repeater. The five casings beat anything case-insensitive; the alg-key-removed handles parsers that default-to-none; the stripped variants handle non-standard parsers that split on `.` and never validate `parts[2]` exists.
+
+### 4. Single-use CSRF tokens in a loop
+
+> *Most CSRF tokens are consumed on submit. Looping a fuzz step that uses `{{csrf}}` succeeds on iteration 1 and fails on every subsequent one — the token was already burnt.*
+
+`workflow.py` now supports a `refresh` block on loop steps that re-fetches per-request state before EACH iteration:
+
+```json
+{
+  "loop": {"count": 50, "var": "i"},
+  "refresh": [{
+    "name": "_get_fresh_csrf",
+    "request": {"method": "GET", "url": "{{base_url}}/form"},
+    "extract": {"csrf": {"regex": "name=\"csrf\" value=\"([^\"]+)\""}}
+  }],
+  "request": {"body": "csrf={{csrf}}&...{{i}}..."}
+}
+```
+
+See [`examples/workflow-csrf-refresh-loop.json`](../examples/workflow-csrf-refresh-loop.json) for the full pattern.
+
+### 5. Cache-key "fat parameter" illusion
+
+> *Web caches typically key only on URL + a few specific headers. Headers like `X-Forwarded-Host` AFFECT the response but aren't part of the cache key. Send the modification once, the cache serves your version to subsequent (vanilla) visitors → web cache poisoning.*
+
+Use [`unkeyed-headers.txt`](../unkeyed-headers.txt) (40+ candidates including `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Original-URL`, `X-Rewrite-URL`, `Forwarded`, RFC 7239 variants, CDN-specific headers) against the cache-poison template:
+
+```bash
+# 1. First, get the baseline length of a clean request:
+curl -sI https://target.com | wc -c       # use response Content-Length instead if accurate
+# 2. Edit examples/cache-poison-template.txt to point at your target
+# 3. Fuzz one header at a time, flag anything that diverges from baseline:
+python3 intruder.py examples/cache-poison-template.txt \
+    --payload unkeyed-headers.txt \
+    --mode sniper \
+    --match-length '!<baseline>' \
+    --max-rps 10
+# 4. Anything that hit: send the same modified request, then a vanilla
+#    request - if the cache still returns the modified version, you've
+#    poisoned it.
+```
+
+### 6. Server-side framework normalization (path-traversal blind spot)
+
+> *Different layers normalize URL paths differently. `..%2f..%2fadmin` may be rejected by the WAF but decoded to `../../admin` by the backend. `....//` may collapse through naive `..` strippers.*
+
+[`path-traversal-payloads.txt`](../path-traversal-payloads.txt) contains 80+ encoding variants in categories:
+- Plain `../`, `../../`, ...
+- URL-encoded slash (`..%2f`)
+- URL-encoded dots (`%2e%2e/`)
+- Double URL-encoded (`..%252f` — filter decodes once, app decodes again)
+- Backslash variants (`..\\`, `..%5c`)
+- Mixed normalizers (`....//`, `....\/`)
+- Null-byte truncation (`../%00`)
+- UTF-8 overlong (`..%c0%af` — Apache + some Java)
+- Ready-to-use full payloads (`../../../etc/passwd`, `WEB-INF/web.xml`, `.env`, `.git/config`)
+
+```bash
+python3 intruder.py req.txt --payload path-traversal-payloads.txt \
+    --match-status 200 --detect-reflection
+```
+
+### 7. Session pinning logout trap
+
+> *Some servers don't issue a new session cookie when you "log out" — the cookie persists, and logging in as User B can quietly re-use User A's session ID. Your "User B" test is actually User A's revived session.*
+
+`workflow.py` now supports `clear_cookies: true` on a step — wipes `session.cookies` before the request goes out. A step with ONLY `clear_cookies` (no `request`) is an explicit identity-switch boundary:
+
+```json
+{"name": "switch_identity", "clear_cookies": true}
+```
+
+See [`examples/workflow-identity-switch.json`](../examples/workflow-identity-switch.json) for the canonical login-A → clear → login-B chain.
 
 ---
 

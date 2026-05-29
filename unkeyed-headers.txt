@@ -1,0 +1,70 @@
+# Unkeyed headers - common HTTP headers that AFFECT the response but
+# are NOT part of typical web-cache keys. Send any of these with a
+# unique value, observe whether the response changes; if the cache
+# then serves your modified response to other clients, you have
+# WEB CACHE POISONING.
+#
+# Use as the wordlist for intruder.py sniper-mode against a request
+# template that has §HEADER_NAME§ in front of `: probe-value`. See
+# examples/cache-poison-template.txt for the canonical template.
+#
+# References: PortSwigger's web cache poisoning research
+# (https://portswigger.net/research/practical-web-cache-poisoning).
+
+# --- Host / URL overrides (the canonical poisoning vectors) ---
+X-Forwarded-Host
+X-Forwarded-Server
+X-Forwarded-For
+X-Forwarded-Proto
+X-Forwarded-Scheme
+X-Forwarded-Port
+X-Forwarded-Path
+X-Forwarded-Prefix
+X-Forwarded-Ssl
+X-Host
+X-Original-URL
+X-Original-Host
+X-Rewrite-URL
+X-Override-URL
+X-HTTP-Host-Override
+X-Originating-URL
+X-Url-Scheme
+X-Proxy-URL
+X-Proxy-Host
+
+# --- RFC 7239 Forwarded (multi-value, often misparsed) ---
+Forwarded
+
+# --- Real-IP variants (often used in auth + logging, sometimes cached) ---
+X-Real-IP
+X-Originating-IP
+X-Remote-IP
+X-Remote-Addr
+X-Client-IP
+X-ProxyUser-Ip
+True-Client-IP
+CF-Connecting-IP
+Fastly-Client-IP
+X-Cluster-Client-IP
+
+# --- CDN / WAF specific ---
+CF-Visitor
+CF-IPCountry
+X-Akamai-Origin-Host
+X-Cdn-Origin
+X-Forwarded-Region
+
+# --- Content negotiation (sometimes affects response but rarely keyed) ---
+X-Wap-Profile
+X-Requested-With
+X-Request-Id
+X-Correlation-Id
+
+# --- Misc that have been seen as cache-poisoning vectors in the wild ---
+X-Edit
+Referer
+Accept-Charset
+Accept-Language
+X-Country
+X-Region
+X-Country-Code

