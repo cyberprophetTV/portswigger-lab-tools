@@ -4,10 +4,22 @@ Small Python tools for solving PortSwigger [Web Security Academy](https://portsw
 
 **See [docs/walkthrough.md](docs/walkthrough.md) for an end-to-end annotated example** of solving the canonical username-enumeration lab with these tools.
 
+## Quick start: launcher
+
+```bash
+pip install requests rich questionary
+python3 lab_tools.py
+```
+
+`lab_tools.py` is an interactive launcher: a Rich-rendered banner, a menu of every tool in the repo, arrow-key navigation, theme picker (neon / matrix / monochrome), and guided prompts for the inputs each tool needs. It then prints the equivalent shell command (so you learn the CLI for next time) and runs the tool for you.
+
+If you'd rather use the CLI directly, every tool is self-contained and runs on `pip install requests` alone — see the table below for entry points.
+
 ## Tools at a glance
 
 | Script | Purpose | Lab(s) |
 |---|---|---|
+| [`lab_tools.py`](lab_tools.py) | Interactive launcher with themes and a menu of all tools | n/a (entry point) |
 | [`username_enum_solver.py`](username_enum_solver.py) | Two-phase username + password attack against an obvious-response leak | [Username enum via different responses](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-different-responses) |
 | [`subtle_response_solver.py`](subtle_response_solver.py) | Same idea but for the ~1-char-difference variant; uses `difflib.SequenceMatcher` + body canonicalization | [Username enum via subtly different responses](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-subtly-different-responses) |
 | [`timing_attack_solver.py`](timing_attack_solver.py) | Detects valid usernames by mean response time; long junk password + per-request X-Forwarded-For rotation | [Username enum via response timing](https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-response-timing) |
@@ -180,7 +192,8 @@ python3 -c "import re,urllib.request as u; \
 ## Requirements
 
 - Python 3.10+
-- `requests` (required)
+- `requests` (required for every tool)
+- `rich` + `questionary` (required to use `lab_tools.py`; the individual scripts work without them)
 - `tqdm` (optional — enables the progress bar; scripts work without it)
 - `pytest` (only needed to run the test suite)
 

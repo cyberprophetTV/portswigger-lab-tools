@@ -22,7 +22,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install requests pytest
+        # requests for the actual tools, rich+questionary for the
+        # launcher, pytest for the suite.
+        run: pip install requests pytest rich questionary
 
       - name: Run tests
         run: pytest tests/ -v
@@ -33,3 +35,8 @@ jobs:
           python3 intruder.py --help > /dev/null
           python3 subtle_response_solver.py --help > /dev/null
           python3 timing_attack_solver.py --help > /dev/null
+
+      - name: Smoke-test lab_tools imports
+        # Can't actually run lab_tools in CI (interactive prompts),
+        # but importing it catches any syntax / dataclass errors.
+        run: python3 -c "import lab_tools; assert lab_tools.TOOLS"
