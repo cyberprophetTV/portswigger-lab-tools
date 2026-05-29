@@ -34,34 +34,33 @@ Then DURING the exam, instant lookup:
 
 TWO FILTER MODES
 ----------------
-Use `--filter critical` to grab ONLY exam/vuln-relevant pages
-(skips "About us", "Pricing", "Customer Stories", etc.). Use the
-default `--filter all` to mirror everything.
+Use `--filter critical` to grab ONLY pages where we DETECT actual
+attack surface - real forms, real injectable parameters, real
+file uploads, real password fields, real JSON API responses. We
+do NOT guess from URL keywords or page text; we look at what's
+actually on the page:
 
-For known sources (portswigger.net, owasp.org, hacktricks.xyz,
-attack.mitre.org, PayloadsAllTheThings on GitHub) we use a curated
-URL ALLOWLIST + DENYLIST that knows the actual structure of each
-site - NOT keyword guessing. PortSwigger Academy lives at
-`/web-security/<topic>/...`; that's what we keep. `/about/`,
-`/customers/`, `/pricing/`, the all-topics index, etc. are
-explicitly skipped. Auto-detected from the start URL host;
-override with `--site portswigger|owasp|hacktricks|...`.
+  - URL has query params with names like id, q, file, url,
+    redirect, token, ...  (the URL itself is an injection point)
+  - <input type="file">                    (upload class)
+  - <input type="password">                (auth/login class)
+  - <form> with <input type="text|email|...">  or  <textarea>
+                                           (generic input boundary)
+  - Body starts with `{` or `[` or `<?xml`  (API response)
 
-For unknown sources we fall back to: code-block density (vuln
-write-ups have many <pre>/<code> blocks; marketing pages have
-none) + URL/body keyword heuristics. Keyword matching alone is a
-weak signal - the site preset is what makes critical mode useful.
+Pages with NONE of those = no attack surface = not saved (but
+still crawled, so we can follow links to pages that DO have it).
+Use `--filter all` to keep the old behavior and mirror every
+in-scope page regardless of surface.
 
-  python3 docs_downloader.py --list-presets                  # see what's known
-  python3 docs_downloader.py https://portswigger.net/web-security \\
-      --output docs/portswigger --filter critical            # uses preset
-  python3 docs_downloader.py https://portswigger.net/web-security \\
-      --output docs/portswigger --filter critical --site none  # force heuristic
-  python3 docs_downloader.py https://portswigger.net/web-security \\
-      --output docs/portswigger --filter all                 # full mirror
+  python3 docs_downloader.py https://target.com \\
+      --output target_surface --filter critical    # vulnerable pages only
+  python3 docs_downloader.py https://target.com \\
+      --output target_full --filter all            # full mirror
 
-Use `--dry-run` to preview WITHOUT writing files - lets you tune
-before committing to a long crawl.
+Use `--dry-run` to preview which pages would be saved without
+writing them - lets you see what surface a target exposes
+without committing to a full crawl.
 
 WHY THIS BYPASSES BURP (intentional)
 ------------------------------------
@@ -134,276 +133,183 @@ from proxy_spider import extract_urls, in_scope
 
 
 # ---------------------------------------------------------------------
-# CRITICAL-CONTENT FILTERING (the "only the pages you need" mode)
+# CRITICAL-CONTENT FILTERING - "page has actual attack surface"
 # =====================================================================
-# When --filter critical is set, we save a page ONLY if it looks
-# security/vuln-relevant. Pages are still CRAWLED (we extract URLs
-# from them so we can reach nested critical pages buried under a
-# non-critical hub) - just not WRITTEN to disk.
+# `--filter critical` saves a page ONLY if we can detect ACTUAL
+# vulnerable surface on it - real forms, real injectable parameters,
+# real file uploads, real password fields, real JSON API responses.
+# We do NOT guess from URL keywords or page text. If the page has
+# nothing you could put a payload into, we don't save it.
 #
-# Four signals, checked in order of reliability:
-#   1. SITE PRESET (most reliable). If we recognize the host
-#      (portswigger.net, owasp.org, hacktricks.xyz, github.com
-#      PayloadsAllTheThings, ...) we have a curated URL allowlist
-#      AND denylist hand-tuned for that site's actual structure.
-#      PortSwigger Academy lives at /web-security/<topic>/...;
-#      everything under /about/, /customers/, /pricing/ is noise.
-#      A keyword like "vulnerability" never had to appear anywhere.
-#   2. CODE-BLOCK DENSITY (good signal for tutorial pages). Vuln
-#      write-ups have many <pre>/<code> blocks (payloads, request
-#      examples, SQL snippets). Marketing pages have zero. >=3
-#      code blocks = likely a vuln write-up.
-#   3. URL pattern (fallback when no preset matches). Substring
-#      check against CRITICAL_URL_PATTERNS.
-#   4. Body keyword (last resort). Substring check against
-#      CRITICAL_KEYWORDS in the cleaned text. Weakest signal -
-#      sites that don't say "SQL injection" in plain text won't
-#      trip it.
+# Pages without surface are still CRAWLED (we extract their links so
+# we can reach attack-surface pages they link to) - just not written
+# to disk.
 #
-# Override the preset choice with --site (auto-detected by default),
-# the URL patterns with --filter-url-pattern, the keywords with
-# --filter-words. `--list-presets` prints the known sites.
+# Signals we check, in order they're reported:
+#   1. URL query params (?id=1, ?file=, ?q=...) - the URL is itself
+#      an injection point. Names matching INJECTABLE_PARAM_NAMES are
+#      called out specifically; generic params are still kept.
+#   2. <input type="file"> - file upload (RCE / XXE / unrestricted
+#      upload class).
+#   3. <input type="password"> - login form (auth bypass / SQLi in
+#      login / brute force / 2FA logic flaws).
+#   4. <form> with text/search/email/url/number/tel inputs or
+#      <textarea> - generic input boundary (XSS / SQLi / SSTI).
+#      Reported with input names when those look injectable.
+#   5. JSON/XML response body - API endpoints are attack surface
+#      even without HTML forms.
 
-# Substrings that, when present in a URL path, mark the page as
-# critical even before fetching. Lowercased for case-insensitive
-# `in` comparison.
-CRITICAL_URL_PATTERNS = [
-    "security", "vulnerab", "exploit", "payload", "injection",
-    "attack", "xss", "csrf", "ssrf", "xxe", "ssti", "sqli",
-    "deseriali", "traversal", "auth", "idor", "jwt", "oauth",
-    "smuggl", "cors", "csp", "cache", "redirect", "upload",
-    "command-inj", "os-command", "template-inj", "ldap",
-    "nosql", "graphql", "race", "broken-access", "directory",
-    "file-inclusion", "lfi", "rfi", "mass-assign",
-    "param-pollut", "host-header", "session", "privilege",
-    "escalation", "bypass", "cve-",
-]
-
-# Keywords that, when present in the page's stripped text content,
-# mark the page as critical. Case-insensitive substring match.
-# Tuned for what PortSwigger Academy / OWASP / HackTricks-style
-# vuln write-ups typically contain.
-CRITICAL_KEYWORDS = [
-    # Vulnerability classes
-    "sql injection", "cross-site scripting", "cross-site request forgery",
-    "server-side request forgery", "xml external entity",
-    "server-side template injection", "command injection", "path traversal",
-    "directory traversal", "file inclusion", "deserialization",
-    "broken access control", "broken authentication",
-    "request smuggling", "cache poisoning", "open redirect",
-    "ldap injection", "nosql injection",
-    "mass assignment", "parameter pollution", "host header",
-    "race condition", "session fixation", "session hijacking",
-    "privilege escalation", "idor",
-    "json web token", "algorithm confusion", "alg=none",
-    # Attack techniques
-    "blind injection", "time-based", "boolean-based", "union-based",
-    "out-of-band", "oast", "collaborator",
-    "stored xss", "reflected xss", "dom xss",
-    "polyglot", "payload",
-    # Concepts that show up in vuln write-ups
-    "vulnerability", "exploit", "bypass", "lab solution",
-    "content security policy", "samesite", "httponly", "csrf token",
-    "cors", "cve-",
-]
-
-
-def is_critical_url(url: str, url_patterns: list[str]) -> bool:
-    """True if the URL path contains any critical pattern."""
-    path_lower = urllib.parse.urlparse(url).path.lower()
-    return any(p in path_lower for p in url_patterns)
-
-
-def is_critical_text(text: str, keywords: list[str]) -> bool:
-    """True if the stripped page text contains any critical keyword."""
-    text_lower = text.lower()
-    return any(k in text_lower for k in keywords)
-
-
-def is_critical(url: str, text: str,
-                 url_patterns: list[str], keywords: list[str]) -> tuple[bool, str]:
-    """
-    Compose URL + text checks. Returns (is_critical, reason).
-
-    NOTE: This is the SHALLOW heuristic - URL pattern + body keyword,
-    no site awareness. Used as a fallback when no site preset matches.
-    For the smart path (site preset + code-block density), see
-    `decide_critical()`.
-    """
-    if is_critical_url(url, url_patterns):
-        return True, "URL pattern match"
-    if is_critical_text(text, keywords):
-        return True, "keyword match in body"
-    return False, "no critical signal"
-
-
-# ---------------------------------------------------------------------
-# SITE PRESETS - hand-tuned allow/deny lists for known docs sources
-# =====================================================================
-# These are the high-signal filters. Each preset knows the actual
-# URL structure of a real site, so we don't have to guess from text.
-#
-# For PortSwigger Academy: everything under /web-security/ is
-# exam-relevant. /about/, /customers/, /pricing/ aren't.
-# /web-security/all-topics is just an index of links - skip it.
-#
-# `hosts` is checked with `host.endswith()` so subdomain variants
-# count (academy.portswigger.net would still match).
-SITE_PRESETS: dict[str, dict] = {
-    "portswigger": {
-        "hosts": ["portswigger.net"],
-        "allow": [
-            "/web-security/",          # The Academy (the main thing)
-            "/burp/documentation/",    # Burp Suite docs - Intruder/Repeater/Collab
-            "/research/",              # PortSwigger Research papers
-            "/daily-swig/",            # Daily Swig news items
-            "/kb/",                    # Knowledge base
-        ],
-        "deny": [
-            "/about/", "/customers/", "/case-studies/",
-            "/pricing/", "/buy/", "/requestquote/", "/users/",
-            "/jobs/", "/contact/", "/login/", "/register/",
-            "/newsletter/", "/events/", "/community/",
-            "/web-security/all-topics",   # Just an index page
-            "/web-security/all-labs",     # Just an index page
-            "/web-security/learning-paths",
-            "/burp/communitydownload",
-            "/burp/pro/trial",
-        ],
-    },
-    "owasp": {
-        "hosts": ["owasp.org", "cheatsheetseries.owasp.org"],
-        "allow": [
-            "/www-community/attacks/",
-            "/www-community/vulnerabilities/",
-            "/www-community/controls/",
-            "/cheatsheets/",
-            "/Top10/",
-            "/www-project-top-ten/",
-            "/www-project-web-security-testing-guide/",
-            "/www-project-application-security-verification-standard/",
-        ],
-        "deny": [
-            "/sponsors/", "/membership/", "/corporate-membership/",
-            "/jobs/", "/events/", "/chapters/", "/about/",
-            "/donate/", "/foundation/", "/news/",
-        ],
-    },
-    "hacktricks": {
-        "hosts": ["book.hacktricks.xyz", "hacktricks.xyz",
-                  "book.hacktricks.wiki", "hacktricks.wiki"],
-        # HackTricks is almost entirely vuln content - allow root,
-        # deny only the meta pages.
-        "allow": ["/"],
-        "deny": [
-            "/welcome/", "/welcome-readme",
-            "/about-the-author", "/sponsors",
-            "/donate", "/training", "/courses",
-            "/external-links",
-        ],
-    },
-    "payloads-all-the-things": {
-        # The famous swisskyrepo collection
-        "hosts": ["github.com", "raw.githubusercontent.com"],
-        "allow": [
-            "/swisskyrepo/payloadsallthethings/",
-        ],
-        "deny": [
-            "/swisskyrepo/payloadsallthethings/blob/master/.github/",
-            "/swisskyrepo/payloadsallthethings/tree/master/.github/",
-            "/issues", "/pulls", "/actions", "/projects",
-            "/stargazers", "/network/",
-        ],
-    },
-    "mitre-attack": {
-        "hosts": ["attack.mitre.org"],
-        "allow": [
-            "/techniques/", "/tactics/", "/groups/",
-            "/software/", "/mitigations/",
-        ],
-        "deny": ["/resources/", "/contribute/", "/contact/"],
-    },
+# Parameter names that historically map to injectable surface across
+# vuln classes. Used to decorate URL query params and form input
+# names with "looks injectable" callouts. Lowercased for matching.
+INJECTABLE_PARAM_NAMES: set[str] = {
+    # Identifiers / lookups (IDOR, SQLi)
+    "id", "uid", "user_id", "userid", "pid", "item", "item_id",
+    "product", "product_id", "order", "order_id", "cat", "cat_id",
+    "category", "category_id", "page_id", "post", "post_id",
+    "account", "account_id", "comment_id", "blog", "blog_id",
+    # Searches / queries (XSS, SQLi)
+    "q", "query", "search", "s", "keyword", "kw", "term",
+    # File / path (LFI, RFI, traversal, upload)
+    "file", "filename", "path", "dir", "directory", "document",
+    "include", "template", "load", "read", "download",
+    # Redirects (open redirect, SSRF)
+    "url", "uri", "redirect", "return", "returnurl", "next", "goto",
+    "callback", "continue", "dest", "destination", "rurl", "redir",
+    "target", "redirect_uri", "redirecturl",
+    # Network (SSRF)
+    "host", "hostname", "domain", "site", "website", "addr",
+    "server", "endpoint", "feed",
+    # Commands (RCE)
+    "cmd", "command", "exec", "system", "do", "action",
+    # Auth / tokens
+    "token", "key", "apikey", "api_key", "access_token",
+    "auth", "session", "sessionid", "session_id", "code",
+    "csrf", "csrftoken", "csrf_token",
+    # Data blobs (deserialization, XXE, NoSQL, prototype pollution)
+    "data", "json", "xml", "yaml", "object", "serial", "payload",
+    "proto", "__proto__",
+    # User input (XSS, comments, stored attacks)
+    "name", "username", "user", "email", "comment", "message",
+    "subject", "title", "body", "text", "content", "description",
+    "address", "phone", "feedback", "review",
+    # Locale (template injection, LFI via lang)
+    "lang", "language", "locale", "l10n",
+    # Generic / catch-all
+    "param", "value", "val", "arg", "input",
 }
 
+# HTML input types that take user-typed content (i.e. inject-able).
+# `hidden` IS included - hidden inputs in forms often hold serialized
+# state or CSRF tokens that are still attackable.
+INJECTABLE_INPUT_TYPES: set[str] = {
+    "text", "search", "email", "url", "number", "tel",
+    "password", "hidden",
+}
 
-def find_site_preset(url: str,
-                      presets: dict[str, dict]) -> tuple[str | None, dict | None]:
+_FORM_RE = re.compile(r"<form\b[^>]*>(.*?)</form\s*>",
+                       re.DOTALL | re.IGNORECASE)
+_INPUT_TAG_RE = re.compile(r"<input\b([^>]*?)/?>", re.IGNORECASE)
+_TYPE_ATTR_RE = re.compile(r'\btype\s*=\s*["\']?([a-zA-Z]+)["\']?',
+                            re.IGNORECASE)
+_NAME_ATTR_RE = re.compile(r'\bname\s*=\s*["\']?([^"\'\s>]+)',
+                            re.IGNORECASE)
+_TEXTAREA_RE = re.compile(r"<textarea\b", re.IGNORECASE)
+_FILE_INPUT_RE = re.compile(
+    r'<input\b[^>]*\btype\s*=\s*["\']?file["\']?', re.IGNORECASE)
+_PASSWORD_INPUT_RE = re.compile(
+    r'<input\b[^>]*\btype\s*=\s*["\']?password["\']?', re.IGNORECASE)
+
+
+def _input_is_text_like(attrs: str) -> bool:
+    """An <input>'s attribute string represents a text-like input
+    if type is absent (defaults to text) OR is one of the
+    inject-able types listed above."""
+    m = _TYPE_ATTR_RE.search(attrs)
+    if not m:
+        return True
+    return m.group(1).lower() in INJECTABLE_INPUT_TYPES
+
+
+def detect_attack_surface(url: str, html: str) -> list[str]:
     """
-    Return (preset_name, preset) if url's host matches a known
-    site preset, else (None, None).
+    Inspect a URL + HTML body for real attack surface. Returns a
+    list of human-readable signal strings. An empty list means NO
+    attack surface was found and the page should be skipped in
+    critical mode.
 
-    Match rule: host endswith any entry in preset['hosts']. So
-    `academy.portswigger.net` matches `portswigger.net`.
+    Detection is signature-based, NOT keyword-based - we look at
+    what's actually on the page (forms, input types, query params,
+    response shape), not at what's written in the prose.
     """
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    for name, preset in presets.items():
-        if any(host == h or host.endswith("." + h) for h in preset["hosts"]):
-            return name, preset
-    return None, None
+    signals: list[str] = []
+
+    # 1. URL query parameters - the URL is itself an injection point.
+    query = urllib.parse.urlparse(url).query
+    if query:
+        param_names = [k.lower() for k, _ in
+                        urllib.parse.parse_qsl(query, keep_blank_values=True)]
+        injectable = [p for p in param_names if p in INJECTABLE_PARAM_NAMES]
+        if injectable:
+            signals.append(f"URL injectable params: {', '.join(injectable[:3])}")
+        elif param_names:
+            signals.append(f"URL query params: {', '.join(param_names[:3])}")
+
+    # 2. File upload (very high signal: RCE / XXE / unrestricted upload).
+    if _FILE_INPUT_RE.search(html):
+        signals.append("file upload field")
+
+    # 3. Password input -> login form (auth-class attack surface).
+    if _PASSWORD_INPUT_RE.search(html):
+        signals.append("password/login form")
+
+    # 4. <form> tags with text-like inputs or <textarea>. Track
+    #    injectable-looking input names separately for the report.
+    forms_with_text = 0
+    injectable_input_names: set[str] = set()
+    for form_body in _FORM_RE.findall(html):
+        input_attr_blocks = _INPUT_TAG_RE.findall(form_body)
+        has_text_input = any(_input_is_text_like(a) for a in input_attr_blocks)
+        has_textarea = bool(_TEXTAREA_RE.search(form_body))
+        if not (has_text_input or has_textarea):
+            continue
+        forms_with_text += 1
+        # Collect names of inputs / textareas / selects
+        for tag in (input_attr_blocks
+                     + _TEXTAREA_RE.findall(form_body)):
+            if isinstance(tag, str):
+                m = _NAME_ATTR_RE.search(tag)
+                if m and m.group(1).lower() in INJECTABLE_PARAM_NAMES:
+                    injectable_input_names.add(m.group(1).lower())
+
+    if injectable_input_names:
+        signals.append("form input names look injectable: "
+                       + ", ".join(sorted(injectable_input_names)[:3]))
+    elif forms_with_text:
+        signals.append(f"{forms_with_text} form(s) with text inputs")
+
+    # 5. JSON / XML response body - API endpoint attack surface.
+    leading = html.lstrip()[:6]
+    if leading.startswith(("{", "[")):
+        signals.append("JSON-shaped response body")
+    elif leading.startswith("<?xml"):
+        signals.append("XML response body")
+
+    return signals
 
 
-def site_preset_decision(url: str,
-                          preset: dict) -> tuple[str, str]:
+def decide_critical(url: str, html: str) -> tuple[bool, str]:
     """
-    Apply a site preset's allow/deny rules to a URL.
+    Critical-mode decision: keep the page iff we can detect actual
+    attack surface in its URL + HTML.
 
-    Returns ('keep'|'skip', reason). Deny wins over allow (so a
-    specific deny pattern can carve an exception out of a broad
-    allow). If neither matches, returns 'skip' - presets are
-    allowlists; pages outside the allowlist are noise.
+    Returns (keep, reason). The reason is the joined signal list
+    when keeping, or "no attack surface detected" when skipping.
     """
-    path = urllib.parse.urlparse(url).path.lower()
-    # Deny first - allow patterns might be broader.
-    for d in preset["deny"]:
-        if d.lower() in path:
-            return "skip", f"matches deny: {d}"
-    for a in preset["allow"]:
-        if a.lower() in path:
-            return "keep", f"matches allow: {a}"
-    return "skip", "not on allowlist"
-
-
-# ---------------------------------------------------------------------
-# CODE-BLOCK DENSITY - vuln write-ups have many; marketing has zero
-# ---------------------------------------------------------------------
-_CODE_BLOCK_RE = re.compile(r"<(pre|code)\b[^>]*>", re.IGNORECASE)
-
-
-def count_code_blocks(html: str) -> int:
-    """Count <pre> and <code> opening tags in raw HTML."""
-    return len(_CODE_BLOCK_RE.findall(html))
-
-
-# ---------------------------------------------------------------------
-# Top-level critical decision: layer site preset > code density >
-# URL pattern > body keyword.
-# ---------------------------------------------------------------------
-def decide_critical(url: str, html: str, text: str,
-                     preset: dict | None,
-                     url_patterns: list[str],
-                     keywords: list[str],
-                     code_block_threshold: int = 3) -> tuple[bool, str]:
-    """
-    Layered critical-content decision. Returns (keep, reason).
-
-    Priority:
-      1. Site preset (most reliable, hand-tuned)
-      2. Code-block density (good signal across sites)
-      3. URL pattern (fallback)
-      4. Body keyword (last resort)
-    """
-    # 1. Site preset - if active, it's authoritative.
-    if preset is not None:
-        decision, reason = site_preset_decision(url, preset)
-        return decision == "keep", f"preset: {reason}"
-
-    # 2. Code-block density - works on most tutorial-style sites.
-    blocks = count_code_blocks(html)
-    if blocks >= code_block_threshold:
-        return True, f"{blocks} code blocks (tutorial-like)"
-
-    # 3. + 4. URL pattern, then body keyword.
-    return is_critical(url, text, url_patterns, keywords)
+    signals = detect_attack_surface(url, html)
+    if signals:
+        return True, "; ".join(signals[:3])
+    return False, "no attack surface detected"
 
 
 # ---------------------------------------------------------------------
@@ -545,42 +451,13 @@ def download(args, session: requests.Session) -> dict:
     frontier: deque[tuple[str, int]] = deque([(args.url, 0)])
     rate_limiter = RateLimiter(max_rps=args.max_rps)
 
-    # Resolve final filter lists - CLI overrides take precedence.
-    url_patterns = (args.filter_url_pattern.split(",") if args.filter_url_pattern
-                     else CRITICAL_URL_PATTERNS)
-    keywords = (args.filter_words.split(",") if args.filter_words
-                else CRITICAL_KEYWORDS)
-    url_patterns = [p.strip().lower() for p in url_patterns if p.strip()]
-    keywords = [k.strip().lower() for k in keywords if k.strip()]
-
-    # Resolve site preset - explicit --site wins, else auto-detect
-    # from the start URL host, else None (falls through to heuristic).
-    preset_name = None
-    preset = None
-    if args.filter == "critical":
-        if args.site and args.site != "auto":
-            if args.site == "none":
-                preset_name, preset = None, None
-            elif args.site in SITE_PRESETS:
-                preset_name, preset = args.site, SITE_PRESETS[args.site]
-            else:
-                print(f"{tag_err()} unknown --site '{args.site}'; "
-                      f"valid: {','.join(SITE_PRESETS)}")
-                sys.exit(2)
-        else:
-            preset_name, preset = find_site_preset(args.url, SITE_PRESETS)
-
     print(f"{tag_info()} start: {bold(args.url)}")
     print(f"{tag_info()} output dir: {bold(str(args.output))}")
     print(f"{tag_info()} bypassing proxy (intentional - speed + cleanliness)")
     print(f"{tag_info()} filter mode: {bold(args.filter)}", end="")
     if args.filter == "critical":
-        if preset is not None:
-            print(f"  (site preset: {bold(preset_name)}, "
-                  f"{len(preset['allow'])} allow / {len(preset['deny'])} deny)")
-        else:
-            print(f"  (no site preset - heuristic: code-density + "
-                  f"{len(url_patterns)} URL patterns + {len(keywords)} keywords)")
+        print("  (save ONLY pages with real attack surface: "
+              "forms / file uploads / login fields / injectable params / JSON APIs)")
     else:
         print("  (save every page)")
     if args.dry_run:
@@ -635,9 +512,7 @@ def download(args, session: requests.Session) -> dict:
 
                 # Filter decision
                 if args.filter == "critical":
-                    keep, reason = decide_critical(
-                        url, body, text, preset, url_patterns, keywords,
-                    )
+                    keep, reason = decide_critical(url, body)
                     if not keep:
                         skipped_filter += 1
                         print(f"  [{status}]  {dim('skip-filter')}  {url}  "
@@ -704,13 +579,11 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("url", nargs="?",
+    ap.add_argument("url",
                     help="Docs URL to start from  "
-                         "(example: https://portswigger.net/web-security). "
-                         "Optional ONLY when used with --list-presets.")
-    ap.add_argument("--output", type=Path,
-                    help="Output directory to mirror the doc tree into "
-                         "(required unless --list-presets)")
+                         "(example: https://portswigger.net/web-security)")
+    ap.add_argument("--output", type=Path, required=True,
+                    help="Output directory to mirror the doc tree into")
 
     # Scope
     ap.add_argument("--any-host", action="store_true",
@@ -725,39 +598,18 @@ def main():
 
     # Filter mode - the headline feature.
     ap.add_argument("--filter", choices=["all", "critical"], default="all",
-                    help="all: save every in-scope page (default, current behavior). "
-                         "critical: only save vuln/exam-relevant pages, using a "
-                         "site-specific allowlist when available (portswigger.net, "
-                         "owasp.org, hacktricks, MITRE ATT&CK, PayloadsAllTheThings) "
-                         "and falling back to code-block density + URL/body keyword "
-                         "matching. Non-critical pages are still CRAWLED for link "
-                         "discovery - just not written to disk.")
-    ap.add_argument("--site",
-                    choices=["auto", "none"] + list(SITE_PRESETS.keys()),
-                    default="auto",
-                    help="Which site preset to use for the critical-mode allowlist. "
-                         "auto (default): pick the preset matching the start URL's "
-                         "host, or fall back to the keyword heuristic if no preset "
-                         "matches. none: force the keyword heuristic even when a "
-                         "preset would match. Or pick one explicitly.")
-    ap.add_argument("--list-presets", action="store_true",
-                    help="Print the known site presets (host + allow/deny rules) "
-                         "and exit. Useful for checking what your --site choice "
-                         "actually does.")
-    ap.add_argument("--filter-words", default="",
-                    help="Comma-separated list of keywords to OVERRIDE the built-in "
-                         "CRITICAL_KEYWORDS list (only used when no site preset is "
-                         "active). Case-insensitive substring against page text. "
-                         "Example: --filter-words 'jwt,oauth,saml'")
-    ap.add_argument("--filter-url-pattern", default="",
-                    help="Comma-separated list of substrings to OVERRIDE the built-in "
-                         "CRITICAL_URL_PATTERNS list (only used when no site preset "
-                         "is active). Case-insensitive against the URL path. "
-                         "Example: --filter-url-pattern '/labs/,/cheatsheet/'")
+                    help="all: save every in-scope page (default). "
+                         "critical: keep ONLY pages where we can detect actual "
+                         "attack surface - forms with text/password/textarea "
+                         "inputs, file upload fields, query params with "
+                         "injectable-looking names (id/q/file/url/...), JSON or "
+                         "XML response bodies. Pages without surface are still "
+                         "CRAWLED for link discovery (so a static landing page "
+                         "linking to a form page still works) - just not written.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Show what WOULD be saved without writing any files. "
-                         "Useful for tuning --filter-words / --filter-url-pattern "
-                         "before committing to a big crawl.")
+                         "Useful for seeing which pages on the target actually "
+                         "expose attack surface before committing to a crawl.")
 
     # Behavior
     ap.add_argument("--save-html", action="store_true",
@@ -771,19 +623,6 @@ def main():
     ap.add_argument("--insecure", action="store_true")
 
     args = ap.parse_args()
-
-    if args.list_presets:
-        print(f"{tag_info()} known site presets:\n")
-        for name, preset in SITE_PRESETS.items():
-            print(f"  {bold(name)}")
-            print(f"    hosts: {', '.join(preset['hosts'])}")
-            print(f"    allow: {', '.join(preset['allow'])}")
-            print(f"    deny : {', '.join(preset['deny'])}")
-            print()
-        sys.exit(0)
-
-    if not args.url or not args.output:
-        ap.error("url and --output are required (unless --list-presets)")
 
     if args.insecure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
