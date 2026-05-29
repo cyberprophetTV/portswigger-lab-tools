@@ -623,7 +623,7 @@ def collect_op_args(op: Operation, q_style) -> dict | None:
     for arg_def in op.args:
         val = questionary.text(
             arg_def["prompt"], default=arg_def.get("default", ""),
-            qmark="›", style=q_style,
+            qmark="", style=q_style,
         ).ask()
         if val is None:
             return None  # Ctrl-C
@@ -650,7 +650,7 @@ def run_magic_picker(console, current: str, q_style) -> str | None:
     console.print(table)
 
     choices = [f"{i}. {name}" for i, (name, _) in enumerate(candidates, start=1)] + ["[ Cancel ]"]
-    pick = questionary.select("Apply which?", choices=choices, qmark="›", style=q_style).ask()
+    pick = questionary.select("Apply which?", choices=choices, qmark="", style=q_style).ask()
     if not pick or pick == "[ Cancel ]":
         return None
     idx = int(pick.split(".", 1)[0]) - 1
@@ -738,6 +738,7 @@ def tui_loop(initial: str):
             ignore_case=True,
             match_middle=True,
             validate=lambda x: True,
+            qmark="",          # no leading symbol - the prompt text is self-explanatory
             style=q_style,
         ).ask()
 
@@ -783,7 +784,7 @@ def tui_loop(initial: str):
         if cmd_lower == "edit":
             new = questionary.text(
                 "Replace current value (multiline, Esc + Enter to finish):",
-                default=current, qmark="›", style=q_style, multiline=True,
+                default=current, qmark="", style=q_style, multiline=True,
             ).ask()
             if new is None:
                 continue
@@ -793,7 +794,7 @@ def tui_loop(initial: str):
 
         if cmd_lower == "save":
             path = questionary.path("Save to (example: out.txt):",
-                                     qmark="›", style=q_style).ask()
+                                     qmark="", style=q_style).ask()
             if not path:
                 continue
             try:
@@ -868,7 +869,7 @@ def main():
         initial = questionary.text(
             "Initial input  (paste / type; empty to start blank):",
             default="", multiline=False,
-            qmark="›",
+            qmark="",
         ).ask() or ""
 
     try:
