@@ -18,7 +18,7 @@ import lab_tools
 from lab_tools import (
     TOOLS, THEMES, Tool, Prompt, build_command, check_paths, RuleTracker,
     parse_motivation, render_motivation_quote, render_motivation_full,
-    render_vuln_matrix,
+    render_vuln_matrix, TOOL_CATEGORIES,
 )
 
 
@@ -266,6 +266,33 @@ class TestRuleTracker:
         t.render(console)
         # Nothing recorded -> nothing rendered.
         assert console.file.getvalue() == ""
+
+
+class TestToolCategories:
+    def test_every_tool_has_known_category(self):
+        # A typo in `category="actvie"` would silently break the
+        # color-coding. Hard-check the value against TOOL_CATEGORIES.
+        for t in TOOLS:
+            assert t.category in TOOL_CATEGORIES, \
+                f"tool {t.key!r} has unknown category {t.category!r}"
+
+    def test_all_four_categories_used(self):
+        # Sanity that we ACTUALLY use all 4 categories - if everyone's
+        # "active" the color-coding adds noise without signal.
+        used = {t.category for t in TOOLS}
+        for required in TOOL_CATEGORIES:
+            assert required in used, \
+                f"no tool uses category {required!r} - either categorize one " \
+                f"or remove the category from TOOL_CATEGORIES"
+
+    def test_each_category_has_style_label_abbrev(self):
+        for name, info in TOOL_CATEGORIES.items():
+            assert "style" in info,  f"{name} missing style"
+            assert "label" in info,  f"{name} missing label"
+            assert "abbrev" in info, f"{name} missing abbrev"
+            # Abbreviations should be short to fit the menu prefix.
+            assert len(info["abbrev"]) <= 4, \
+                f"{name} abbrev too long: {info['abbrev']!r}"
 
 
 class TestVulnerabilityMapping:

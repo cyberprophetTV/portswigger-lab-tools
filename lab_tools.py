@@ -261,6 +261,24 @@ class Tool:
     # intro panel + in the "vulnerability matrix" menu entry, so the
     # user knows WHEN to reach for which tool.
     vulnerabilities: list[str] = field(default_factory=list)
+    # Tool category for color-coding in the menu + intro panel.
+    # One of: "active" (actively probing the target, yellow),
+    #         "solver" (purpose-built lab solver, cyan),
+    #         "analysis" (passive local analysis, green),
+    #         "reference" (read-only reference, magenta).
+    # Color shorthand: AT a GLANCE which menu entries are which.
+    category: str = "active"
+
+
+# Category definitions: display label + Rich style + 3-letter abbrev
+# used in the questionary select prefix. Centralized here so a future
+# theme change touches one place.
+TOOL_CATEGORIES = {
+    "active":    {"label": "active",  "style": "warning",  "abbrev": "ACT"},
+    "solver":    {"label": "solver",  "style": "primary",  "abbrev": "SOL"},
+    "analysis":  {"label": "analyze", "style": "success",  "abbrev": "ANA"},
+    "reference": {"label": "ref",     "style": "accent",   "abbrev": "REF"},
+}
 
 
 TOOLS: list[Tool] = [
@@ -286,6 +304,7 @@ TOOLS: list[Tool] = [
             "Username enumeration (response-content leak)",
             "Authentication / credential brute-force",
         ],
+        category="solver",
     ),
     Tool(
         key="enum_subtle",
@@ -309,6 +328,7 @@ TOOLS: list[Tool] = [
             "Username enumeration (subtle content delta)",
             "Authentication / credential brute-force",
         ],
+        category="solver",
     ),
     Tool(
         key="enum_timing",
@@ -335,6 +355,7 @@ TOOLS: list[Tool] = [
             "Username enumeration (response-time / timing oracle)",
             "Authentication / timing-oracle attacks",
         ],
+        category="solver",
     ),
     Tool(
         key="exploit_server",
@@ -368,6 +389,7 @@ TOOLS: list[Tool] = [
             "File-upload delivery (webshells, polyglots)",
             "Open redirect chain landing pages",
         ],
+        category="active",
     ),
     Tool(
         key="cheatsheet",
@@ -388,6 +410,7 @@ TOOLS: list[Tool] = [
             "command-inj/file-upload/CSRF/NoSQLi/LDAP/race/cache-poison/"
             "path-traversal/open-redirect/deserialization",
         ],
+        category="reference",
     ),
     Tool(
         key="cyberchef",
@@ -412,6 +435,7 @@ TOOLS: list[Tool] = [
             "JWT inspection (decode + flag security observations)",
             "Encoded-blob recognition (magic auto-detect mode)",
         ],
+        category="analysis",
     ),
     Tool(
         key="workflow",
@@ -438,6 +462,7 @@ TOOLS: list[Tool] = [
             "Session-pinning logout traps (via clear_cookies)",
             "Any vuln that requires per-iteration state refresh",
         ],
+        category="active",
     ),
     Tool(
         key="privesc",
@@ -469,6 +494,7 @@ TOOLS: list[Tool] = [
             "Privilege escalation (horizontal + vertical)",
             "Forced browsing past per-role restrictions",
         ],
+        category="solver",
     ),
     Tool(
         key="security_audit",
@@ -491,6 +517,7 @@ TOOLS: list[Tool] = [
             "Chained vuln pre-condition: XSS, CSRF, clickjacking, "
             "session hijacking risk indicators",
         ],
+        category="analysis",
     ),
     Tool(
         key="param_miner",
@@ -523,6 +550,7 @@ TOOLS: list[Tool] = [
             "Prototype pollution (__proto__, constructor) entry points",
             "SSRF / open-redirect via undocumented URL params",
         ],
+        category="active",
     ),
     Tool(
         key="dirbuster",
@@ -554,6 +582,7 @@ TOOLS: list[Tool] = [
             "Pre-condition for many other vulns (you can't exploit "
             "what you haven't found)",
         ],
+        category="active",
     ),
     Tool(
         key="intruder",
@@ -600,6 +629,7 @@ TOOLS: list[Tool] = [
             "Web cache poisoning (with unkeyed-headers.txt)",
             "ANY 'swap X into position Y' fuzzing",
         ],
+        category="active",
     ),
 ]
 
@@ -714,22 +744,36 @@ def show_tool_menu(console: Console) -> Tool | None | str:
     user wants to view the Brain Unloader.
     """
     console.print()
-    console.print("[primary]Available tools[/primary]")
+    console.print("[primary]Available tools[/primary]  "
+                  "[muted](color/prefix = category)[/muted]")
 
-    # Render a Rich Table summarizing each tool: number, name, script.
-    # This is purely informational - the actual selection happens via
-    # questionary's arrow-key navigator.
+    # Render a Rich Table summarizing each tool: number, type
+    # (color-coded by category), name, script.
     table = Table(border_style="muted", show_lines=False, padding=(0, 1))
     table.add_column("#",      style="accent",  width=3)
+    table.add_column("Type",   width=8)
     table.add_column("Tool",   style="primary")
     table.add_column("Script", style="muted")
     for i, t in enumerate(TOOLS, start=1):
-        table.add_row(str(i), t.name, t.script)
+        cat = TOOL_CATEGORIES.get(t.category, TOOL_CATEGORIES["active"])
+        type_cell = f"[{cat['style']}]{cat['label']}[/{cat['style']}]"
+        table.add_row(str(i), type_cell, t.name, t.script)
     console.print(table)
+    # Category legend - shown once below the table so users learn the colors.
+    legend_parts = []
+    for cat_key, cat_info in TOOL_CATEGORIES.items():
+        legend_parts.append(
+            f"[{cat_info['style']}]{cat_info['label']}[/{cat_info['style']}] "
+            f"[muted]= {cat_info['abbrev']}[/muted]"
+        )
+    console.print("[muted]Categories:[/muted]  " + "  |  ".join(legend_parts))
 
-    # Use questionary for the actual selection.
-    choices = [t.name for t in TOOLS] + [_VULN_MATRIX_ACTION,
-                                           _MOTIVATION_ACTION, "Quit"]
+    # Use questionary for the actual selection. Prefix each tool name
+    # with the category abbreviation so the user sees the type even in
+    # the plain-text questionary list.
+    choices = [f"[{TOOL_CATEGORIES[t.category]['abbrev']}] {t.name}"
+                for t in TOOLS]
+    choices += [_VULN_MATRIX_ACTION, _MOTIVATION_ACTION, "Quit"]
     pick = questionary.select(
         "Pick a tool:",
         choices=choices,
@@ -741,11 +785,20 @@ def show_tool_menu(console: Console) -> Tool | None | str:
         return _MOTIVATION_ACTION
     if pick == _VULN_MATRIX_ACTION:
         return _VULN_MATRIX_ACTION
-    return next(t for t in TOOLS if t.name == pick)
+    # Strip the "[ACT] " / "[SOL] " / etc. prefix to match back to the
+    # underlying Tool.
+    tool_name = pick
+    if pick.startswith("[") and "] " in pick:
+        tool_name = pick.split("] ", 1)[1]
+    return next(t for t in TOOLS if t.name == tool_name)
 
 
 def show_tool_intro(console: Console, tool: Tool) -> None:
     """Print the tool's description + which vuln classes it targets + lab URL."""
+    cat = TOOL_CATEGORIES.get(tool.category, TOOL_CATEGORIES["active"])
+    # Category appears in the title so you see it again even after
+    # selection - reinforces the color/abbrev association.
+    title = f"[{cat['style']}][{cat['label'].upper()}][/{cat['style']}]  {tool.name}"
     content = Text.assemble(tool.description)
     if tool.vulnerabilities:
         content.append("\n\nVulnerability classes this addresses:\n", style="primary")
@@ -756,7 +809,9 @@ def show_tool_intro(console: Console, tool: Tool) -> None:
     if tool.lab_url:
         content.append("\nTarget lab: ")
         content.append(tool.lab_url, style="url")
-    console.print(Panel(content, title=tool.name, border_style="primary",
+    # Border color matches the tool's category - at-a-glance category
+    # cue even after you've drilled into the tool.
+    console.print(Panel(content, title=title, border_style=cat["style"],
                         padding=(1, 2)))
 
 
