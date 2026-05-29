@@ -18,6 +18,103 @@
 # for 30 minutes when a quiet line at the top of the screen says
 # "every minute on this counts toward your $X-an-hour job offer."
 
+## Methodology - the 6 phases (never get stuck)
+
+When you don't know what to do next, ask: "Which phase am I in?
+What's the EXIT condition for this phase? What's phase N+1?"
+Then move. Stuck = ignoring the phase boundary.
+
+## PHASE 1: Map the surface  (target 15-20 min per host)
+
+- Run proxy_spider against the target with creds (if given).
+- Click through EVERY visible flow at least once: register, login,
+  view profile, post, edit, search, upload, checkout, logout.
+- Note every page, every form, every parameter, every cookie.
+- Tag each input by SHAPE: id-like, search-like, file-like,
+  url-like, blob-like, auth-like. Shape predicts vuln class.
+- EXIT when: you have a numbered list of >=10 candidate inputs
+  + you can describe the app's auth/role model in one sentence.
+
+## PHASE 2: Surface fuzz  (target 30-40 min total, both hosts)
+
+For EVERY input from phase 1, send ONE quick probe of each
+plausible class. Don't go deep yet - just paint the map.
+
+- SQLi:        `'`  `"`  `'-- -`  `' OR 1=1-- -`
+- XSS:         `<svg onload=alert(1)>`  `"><img src=x onerror=alert(1)>`
+- SSTI:        `{{7*7}}`  `${7*7}`  `<%=7*7%>`
+- SSRF:        `http://YOUR_OAST_HOST/`  (any URL/host/feed param)
+- Cmd inj:     `;sleep 5;`  ``` `sleep 5` ```  `|sleep 5`
+- Traversal:   `../../../../etc/passwd`  `....//`
+- Open redir:  `//evil.com`  `https://attacker/`
+- JWT:         decode every JWT, look for alg=none / weak key /
+               kid path injection
+- IDOR:        change every id parameter to 1, 2, 999, your-own-id
+
+Record EVERY anomaly: error messages, timing differences,
+response size deltas, header changes. Failed attempts inform
+the next hypothesis.
+
+EXIT when: you have a list of 2-5 PROMISING leads (anything that
+errored weirdly, took too long, or echoed your payload).
+
+## PHASE 3: Pursue the best lead  (HARD CAP 30 min per lead)
+
+- Pick the highest-signal lead from phase 2 (echoed payload >
+  SQL error > timing difference > weird header).
+- Try to confirm + escalate: from "alert(1) fires" to "cookie
+  exfil to my exploit server"; from "SQL error" to "data
+  exfil via UNION or blind".
+- 15-MINUTE RULE: if 15 min on this lead and no progress,
+  CHANGE the assumption. What if it's a DIFFERENT vuln class?
+  What if the entry point is different?
+- 30-MINUTE RULE: if 30 min total and still no progress on
+  THIS lead, drop to the next lead in the list. Come back later.
+
+EXIT when: you've confirmed a vuln + know how to weaponize it.
+
+## PHASE 4: Auth / session / JWT  (needed for admin path)
+
+If your phase-3 vuln doesn't get you to admin directly, you
+need to climb the privilege ladder:
+
+- Try every login form for default creds (admin/admin etc.)
+- Check JWT for: alg=none, alg confusion (RS->HS), weak HMAC
+  secret (jwt_tool can crack), kid SQLi/path traversal,
+  exp not validated.
+- Test password reset for: token in URL, predictable token,
+  token replay across users, host header injection in reset
+  email link.
+- Check session for: cookie tampering, session fixation,
+  predictable session IDs, missing logout invalidation.
+- 2FA bypass: skip step, replay code, race the request.
+
+EXIT when: you can authenticate (or impersonate) as a higher-
+privilege user.
+
+## PHASE 5: Privesc to admin  (always required for full mark)
+
+The exam expects an ADMIN-level finding. Common paths:
+
+- Stored XSS in a field admin reads -> steal admin cookie
+- IDOR on /admin/* or /api/admin/* endpoints
+- Mass assignment: add `"isAdmin":true` or `"role":"admin"`
+- Backup or staging endpoints (`/admin.bak`, `/api/v1/admin`,
+  `/_admin/`) - dirbuster these aggressively
+- CSRF on admin action where you control admin session via
+  another vuln
+
+EXIT when: you can perform an admin-only action.
+
+## PHASE 6: Read the secret + submit  (final 10-15 min)
+
+- Use admin access to read the lab's secret file
+  (often `/etc/passwd`, `/home/carlos/secret`, an admin
+  panel value, or a downloadable file).
+- Double-check you actually got the SECRET, not a similar string.
+- Submit the answer in the exam portal. DON'T forget this step -
+  you've seen people fail by running out of time mid-write-up.
+
 ## My goal
 
 I'm earning the BSCP certification because I want to move from
@@ -43,6 +140,11 @@ I'm earning the BSCP certification because I want to move from
   If 15 minutes haven't found it, switch angle, don't dig deeper.
 - I CAN ask for help. PortSwigger's solutions page exists. Using
   it for ONE step is not failure - failing the whole exam is failure.
+- Stuck = I forgot which phase I'm in. Re-read the phases above.
+  If I'm 30 min into phase 3 with no progress, drop the lead and
+  go back to my phase 2 list.
+- Stuck on host A for >30 min? Switch to host B. Fresh eyes find
+  things tired eyes miss; you can come back to A later.
 
 ## Small wins to remember
 
