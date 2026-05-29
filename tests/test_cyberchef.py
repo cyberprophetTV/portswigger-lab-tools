@@ -697,6 +697,67 @@ class TestIdentifyStructuredData:
                         for l in labels)
 
 
+class TestIdentifyAuthPrefixes:
+    def test_bearer_jwt_identified_both_ways(self):
+        # `Bearer eyJ...` should identify BOTH the Bearer prefix AND
+        # recurse to identify the inner JWT.
+        token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig"
+        labels = _labels(f"Bearer {token}")
+        assert any("Bearer" in l for l in labels)
+        assert any("(inner credential) JWT" in l for l in labels)
+
+    def test_bearer_lowercase(self):
+        # Some apps use lowercase bearer.
+        token = "abc123def456ghi789jkl"
+        labels = _labels(f"bearer {token}")
+        assert any("Bearer" in l for l in labels)
+
+    def test_basic_auth_value(self):
+        # Basic + b64 of admin:password
+        labels = _labels("Basic YWRtaW46cGFzc3dvcmQ=")
+        assert any("Basic" in l for l in labels)
+        # Inner should be identified too (HTTP Basic auth value).
+        assert any("(inner credential)" in l for l in labels)
+
+    def test_token_prefix(self):
+        labels = _labels("Token abc123def456ghi789jkl012mno345")
+        assert any("Token" in l for l in labels)
+
+
+class TestIdentifyOpaqueTokenFallback:
+    def test_long_alphanum_falls_through_to_opaque_token(self):
+        # No specific format - long random-looking string with length
+        # NOT divisible by 4 (so base64 detector won't claim it first).
+        # Fallback should fire so the user gets SOMETHING actionable.
+        labels = _labels("aBcD1234efGh5678ijKlMnOp90123")    # 29 chars
+        assert any("opaque token" in l for l in labels)
+
+    def test_short_random_does_NOT_trip_opaque_token(self):
+        # < 16 chars - too short to be a meaningful opaque token,
+        # would just be noisy.
+        labels = _labels("short42")
+        assert not any("opaque token" in l for l in labels)
+
+    def test_low_entropy_does_not_trip_opaque(self):
+        # All-same character or very low diversity - not a token,
+        # probably just placeholder text.
+        labels = _labels("aaaaaaaaaaaaaaaaaaaaaaaa")
+        assert not any("opaque token" in l for l in labels)
+
+    def test_one_char_class_does_not_trip(self):
+        # All lowercase + low diversity - not opaque-token shaped.
+        labels = _labels("hello world this is some text")
+        assert not any("opaque token" in l for l in labels)
+
+    def test_specific_match_suppresses_opaque_fallback(self):
+        # A 24-hex string matches MongoDB ObjectId AND is the right
+        # SHAPE to be opaque-token. ObjectId should win; opaque
+        # should NOT also fire.
+        labels = _labels("507f1f77bcf86cd799439011")
+        assert any("MongoDB" in l for l in labels)
+        assert not any("opaque token" in l for l in labels)
+
+
 # ---------------------------------------------------------------------
 # Additional format detectors (modern hashes, network, vendor tokens,
 # attack payloads)

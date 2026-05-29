@@ -488,6 +488,30 @@ def identify_format(text: str) -> list[FormatHint]:
     if not s:
         return hints
 
+    # ---- HTTP auth header prefix stripping ----
+    # If the user pastes a full `Bearer eyJ...` or `Basic YWRtaW4=`
+    # auth-header value, recognize the prefix AND recurse on the
+    # actual token so the user gets BOTH "this is a Bearer token" AND
+    # "the inner token looks like a JWT" hints.
+    for prefix, kind in (("Bearer ",  "HTTP Bearer (often JWT or opaque OAuth token)"),
+                          ("bearer ",  "HTTP Bearer (often JWT or opaque OAuth token)"),
+                          ("Basic ",   "HTTP Basic (base64 of user:pass)"),
+                          ("Token ",   "HTTP Token (custom auth header value)"),
+                          ("token ",   "HTTP Token (custom auth header value)")):
+        if s.startswith(prefix):
+            hints.append(FormatHint(
+                f"HTTP Authorization header value ({kind.split('(', 1)[0].strip()})",
+                f"prefix is `{prefix.strip()}`. The remaining part is the actual "
+                f"credential - identifying it below."))
+            # Recurse on the token portion so the user gets the inner
+            # interpretation (JWT, base64, opaque).
+            inner_hints = identify_format(s[len(prefix):])
+            for h in inner_hints:
+                # Tag inner hints so they're distinguishable from outer.
+                hints.append(FormatHint(f"(inner credential) {h.label}",
+                                          h.suggestion))
+            return hints
+
     # ---- Modern password-hash formats (structured, very distinctive) ----
     # Bcrypt: $2a$ / $2b$ / $2x$ / $2y$  $cost$  22-char salt + 31-char hash
     if re.fullmatch(r"\$2[abxy]?\$\d{2}\$[./A-Za-z0-9]{53}", s):
@@ -1004,6 +1028,32 @@ def identify_format(text: str) -> list[FormatHint]:
             "Hex-encoded bytes",
             "use `hexd` to decode to bytes / ASCII"))
 
+    # ---- Last-resort fallback: opaque high-entropy token ----
+    # Fires ONLY when nothing else matched AND the input is a single
+    # line of high-entropy alphanumeric/url-safe characters - matches
+    # the shape of random session IDs, opaque OAuth tokens, refresh
+    # tokens, API keys without a vendor prefix.
+    # Length-gated to avoid flagging short identifiers like "abc123".
+    if (not hints
+            and "\n" not in s
+            and len(s) >= 16
+            and re.fullmatch(r"[A-Za-z0-9_.+/=-]+", s)):
+        # Approximate entropy: count unique-char ratio + presence of
+        # both letter cases. Real opaque tokens are usually
+        # >0.4 unique-char ratio.
+        unique_ratio = len(set(s)) / max(1, len(s))
+        has_upper = any(c.isupper() for c in s)
+        has_lower = any(c.islower() for c in s)
+        has_digit = any(c.isdigit() for c in s)
+        char_classes = sum((has_upper, has_lower, has_digit))
+        if unique_ratio > 0.3 and char_classes >= 2:
+            hints.append(FormatHint(
+                "Looks like an opaque token / session ID / random secret",
+                "no specific vendor pattern matched. Try `b64d` (it might "
+                "be base64 of something readable), `magic` (auto-tries every "
+                "decoder), or just check if it's a session cookie value you "
+                "should tamper with."))
+
     return hints
 
 
@@ -1179,11 +1229,27 @@ def collect_op_args(op: Operation, q_style) -> dict | None:
     return args
 
 
-def _format_hints_short(hints: list[FormatHint]) -> str:
-    """Compact one-cell display: 'X | Y' or '-' if empty."""
-    if not hints:
-        return "-"
-    return "  •  ".join(h.label for h in hints)
+def _format_hints_short(hints: list[FormatHint], decoded_value: str = "") -> str:
+    """
+    Compact one-cell display of hint labels. If no hints matched,
+    return a useful "what is this?" descriptor based on the value's
+    SHAPE rather than just a dash - so the magic table never shows
+    a row that means nothing.
+    """
+    if hints:
+        return "  •  ".join(h.label for h in hints)
+    if not decoded_value:
+        return "(empty)"
+    # Heuristic descriptors when no specific format matched.
+    if all(c.isprintable() or c in "\n\t" for c in decoded_value):
+        if len(decoded_value) < 80 and " " in decoded_value:
+            return "(plain text)"
+        if "\n" in decoded_value:
+            return "(multi-line text)"
+        if all(c.isalnum() or c in "-_" for c in decoded_value):
+            return "(opaque alphanumeric blob)"
+        return "(readable text, no specific format)"
+    return "(binary / non-printable)"
 
 
 def run_magic_picker(console, current: str, q_style) -> str | None:
@@ -1232,7 +1298,7 @@ def run_magic_picker(console, current: str, q_style) -> str | None:
         table.add_row(
             str(i), name,
             truncate_display(result, 80),
-            _format_hints_short(hints),
+            _format_hints_short(hints, decoded_value=result),
         )
     console.print(table)
 
