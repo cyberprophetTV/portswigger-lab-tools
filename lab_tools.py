@@ -312,6 +312,26 @@ TOOLS: list[Tool] = [
         ],
     ),
     Tool(
+        key="privesc",
+        name="Privilege-escalation / IDOR comparator (dual cookies)",
+        script="privesc.py",
+        description=(
+            "Replay the same URL list as TWO different cookie jars "
+            "(admin + low-priv) and classify each response pair. Flags "
+            "IDOR_LIKELY (both 200, similar body), CONTENT_DELTA "
+            "(both 200, different), and BYPASS (admin blocked, user "
+            "not). Auth-control bug finder."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("url_list", "File with one URL per line", kind="path"),
+            Prompt("--admin-jar", "Admin cookie jar (JSON, blank to skip)",
+                   default="", kind="path", required=False),
+            Prompt("--user-jar",  "Low-priv cookie jar (JSON, blank to skip)",
+                   default="", kind="path", required=False),
+        ],
+    ),
+    Tool(
         key="security_audit",
         name="Security audit (headers + cookies)",
         script="security_audit.py",

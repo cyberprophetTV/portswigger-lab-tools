@@ -28,6 +28,7 @@ If you'd rather use the CLI directly, every tool is self-contained and runs on `
 | [`param_miner.py`](param_miner.py) | Discover hidden admin/debug parameters that don't appear in browser traffic (admin, debug, role, isAdmin, ...). Handles URL-encoded and JSON bodies; compares each variant against a noise-aware baseline | BSCP-style hidden-parameter labs and real apps with undocumented backdoors |
 | [`security_audit.py`](security_audit.py) | One-GET passive audit: missing CSP/HSTS/X-Frame-Options/etc., cookies lacking HttpOnly/Secure/SameSite, tech-stack disclosure headers | Any URL, including post-auth pages with `--cookie-jar` |
 | [`jwt_tool.py`](jwt_tool.py) | JWT analyzer with attack helpers: `decode` (with security observations), `none` (alg=none forgery in three casings), `brute` (HS256 wordlist attack), `sign` (re-sign with known secret), `kid` (kid-header injection variants). CLI subcommands only — not in the launcher menu. | Any JWT-using lab |
+| [`privesc.py`](privesc.py) | Dual-token access-control comparator. Replays a URL list under two cookie jars (admin + low-priv) and classifies each pair: `IDOR_LIKELY`, `CONTENT_DELTA`, `BYPASS`, `EXPECTED_BLOCK`, etc. Uses `difflib.SequenceMatcher.ratio()` for body similarity scoring. | BSCP-style IDOR / broken access control labs |
 
 ## Disclaimer — Educational use only
 

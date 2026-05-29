@@ -1007,6 +1007,12 @@ class FuzzConfig:
     # and add a `reflected` field to the result. Useful for spotting
     # XSS/SQLi reflection points.
     detect_reflection: bool = False
+    # OOB (out-of-band) host for blind-vulnerability probing. When
+    # set, each request gets a unique subdomain-of-this-host injected
+    # into User-Agent, Referer, and X-Forwarded-For headers. Any hit
+    # on the OOB server means SOMETHING parsed our payload server-
+    # side - SSRF, blind SQLi, blind XXE, log4j-style, etc.
+    oob_host: str | None = None
 
 
 # =====================================================================
@@ -1083,12 +1089,37 @@ def fuzz(cfg: FuzzConfig) -> None:
         sess = (build_session(1, cfg.proxy, cfg.insecure, cfg.retries,
                               cookies=cfg.cookies)
                 if cfg.fresh_session else shared)
+
+        # ---- OOB injection ----
+        # When cfg.oob_host is set, inject a unique subdomain into
+        # User-Agent, Referer, and X-Forwarded-For for THIS request.
+        # The OOB server (interactsh, webhook.site, canarytoken,
+        # self-hosted DNS, etc.) records any hits; the user correlates
+        # the unique subdomain back to the label that produced it.
+        oob_id = None
+        if cfg.oob_host:
+            # Use a short random hex token so the subdomain stays well
+            # under DNS-label-length limits (63 chars).
+            import secrets
+            oob_id = secrets.token_hex(6)
+            oob_value = f"{oob_id}.{cfg.oob_host}"
+            # Clone the headers list and add/override the probe ones.
+            new_headers = [(k, v) for k, v in req.headers
+                           if k.lower() not in ("user-agent", "referer", "x-forwarded-for")]
+            new_headers.extend([
+                ("User-Agent", f"Mozilla/5.0 ({oob_value})"),
+                ("Referer", f"https://{oob_value}/"),
+                ("X-Forwarded-For", oob_value),
+            ])
+            req = RawRequest(method=req.method, path=req.path,
+                             headers=new_headers, body=req.body)
+
         try:
             r, elapsed = send(sess, req, host, scheme)
-            return label, req, payloads, r.status_code, len(r.content), r.text, elapsed, None
+            return label, req, payloads, r.status_code, len(r.content), r.text, elapsed, None, oob_id
         except requests.exceptions.RequestException as e:
             # Connection errors, DNS failures, timeouts, etc.
-            return label, req, payloads, None, 0, "", 0.0, str(e)
+            return label, req, payloads, None, 0, "", 0.0, str(e), oob_id
 
     with ThreadPoolExecutor(max_workers=cfg.workers) as ex:
         futures = [ex.submit(worker, it) for it in iterations]
@@ -1097,7 +1128,7 @@ def fuzz(cfg: FuzzConfig) -> None:
         # requests) show progress instead of looking hung. The bar is
         # a no-op when tqdm isn't installed.
         for fut in progress(as_completed(futures), total=len(futures), desc=cfg.mode):
-            label, req, payloads, status, length, body, elapsed, err = fut.result()
+            label, req, payloads, status, length, body, elapsed, err, oob_id = fut.result()
 
             # Reflection detection: does any of the substituted payload
             # values appear verbatim in the response body? Skip empty
@@ -1145,6 +1176,10 @@ def fuzz(cfg: FuzzConfig) -> None:
                 }
                 if cfg.detect_reflection:
                     entry["reflected"] = reflected
+                if cfg.oob_host:
+                    # Save the OOB id so the user can correlate it
+                    # with hits on their OOB server's log.
+                    entry["oob_id"] = oob_id
                 results.append(entry)
 
     # ---- write any enabled output format(s) ----
@@ -1217,6 +1252,14 @@ def main():
                          "value(s). Any reflection is a strong XSS / SQLi hint "
                          "and gets a REFLECTED marker on the output line + "
                          "a `reflected` field in the JSON/CSV output.")
+    ap.add_argument("--oob-host", metavar="HOST",
+                    help="Out-of-band / Collaborator host. Each request gets "
+                         "a unique <random>.HOST injected into User-Agent, "
+                         "Referer, and X-Forwarded-For. Any hit on the OOB "
+                         "server means the server-side parsed our payload "
+                         "(SSRF, blind SQLi, blind XXE, log4shell, etc.). "
+                         "Use your own interactsh / canarytoken / "
+                         "webhook.site / DNS-canary host.")
     # ---- Stealth / session (same set as username_enum_solver.py) ----
     ap.add_argument("--workers", type=int, default=10,
                     help="Concurrent requests (default 10)")
@@ -1357,6 +1400,7 @@ def main():
         output_md=args.output_md,
         cookies=cookies,
         detect_reflection=args.detect_reflection,
+        oob_host=args.oob_host,
     )
 
     fuzz(cfg)
