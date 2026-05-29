@@ -68,6 +68,32 @@ class TestExtractUrls:
         urls = extract_urls(html, "https://x.com/")
         assert len(urls) == 6
 
+    def test_malformed_ipv6_url_skipped(self):
+        # urllib raises ValueError("Invalid IPv6 URL") on hrefs that
+        # look like broken IPv6 literals (stray `[`). Used to crash
+        # the whole crawl; now skipped.
+        html = (
+            '<a href="http://[bad-ipv6/oops">crash</a>'
+            '<a href="/good">good</a>'
+        )
+        urls = extract_urls(html, "https://x.com/")
+        # The good link survives; the bad one is dropped silently
+        assert "https://x.com/good" in urls
+        assert not any("bad-ipv6" in u for u in urls)
+
+    def test_no_crash_on_assorted_garbage_hrefs(self):
+        # A bunch of pathological hrefs in one doc - none should raise
+        html = (
+            '<a href="http://[">a</a>'
+            '<a href="]">b</a>'
+            '<a href="http://[::1]:bad">c</a>'
+            '<a href="//[malformed">d</a>'
+            '<a href="/ok">ok</a>'
+        )
+        # Must not raise
+        urls = extract_urls(html, "https://x.com/")
+        assert "https://x.com/ok" in urls
+
 
 class TestExtractFormParams:
     def test_input_name(self):

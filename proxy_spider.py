@@ -148,7 +148,13 @@ def extract_urls(html: str, base_url: str) -> set[str]:
                                             "tel:", "data:")):
                 continue
             # urljoin handles relative paths, ../, missing scheme, etc.
-            resolved = urllib.parse.urljoin(base_url, raw)
+            # It CAN raise ValueError on malformed hrefs that look like
+            # broken IPv6 literals (e.g. a stray `[` in the URL) - skip
+            # those rather than killing the crawl.
+            try:
+                resolved = urllib.parse.urljoin(base_url, raw)
+            except ValueError:
+                continue
             # Strip fragment
             resolved = resolved.split("#", 1)[0]
             found.add(resolved)
@@ -251,8 +257,11 @@ def crawl(args, session: requests.Session) -> dict:
                 # Follow redirects (count toward depth) so we don't
                 # miss content gated by /login -> /my-account etc.
                 if location and status in (301, 302, 307, 308):
-                    redir_url = urllib.parse.urljoin(url, location).split("#")[0]
-                    if redir_url not in visited and in_scope(redir_url, base_host, args):
+                    try:
+                        redir_url = urllib.parse.urljoin(url, location).split("#")[0]
+                    except ValueError:
+                        redir_url = None
+                    if redir_url and redir_url not in visited and in_scope(redir_url, base_host, args):
                         if depth < args.max_depth:
                             frontier.append((redir_url, depth + 1))
                         discovered.add(redir_url)
