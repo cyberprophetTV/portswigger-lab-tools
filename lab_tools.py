@@ -406,6 +406,64 @@ TOOLS: list[Tool] = [
         category="solver",
     ),
     Tool(
+        key="proxy_spider",
+        name="Proxy spider (hydrate Burp + map attack surface)",
+        script="proxy_spider.py",
+        description=(
+            "Crawl a target site, extract every link + form action + "
+            "form input name, and route ALL traffic through Burp's "
+            "proxy at 127.0.0.1:8080 so it lands in Burp's HTTP History. "
+            "In minutes you've pre-populated Burp with the whole attack "
+            "surface before manual testing."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("url", "Start URL  (example: https://target.com)",
+                   shared_var="lab_url"),
+            Prompt("--max-pages", "Page cap  (stop after N pages, default 200)",
+                   default="200", required=False),
+            Prompt("--max-depth", "BFS depth limit  (default 5)",
+                   default="5", required=False),
+            Prompt("--proxy", "Proxy URL  ('burp' = http://127.0.0.1:8080)",
+                   default="burp", required=False),
+        ],
+        category="active",
+        vulnerabilities=[
+            "Attack-surface mapping (Burp-Community equivalent of Burp Pro's crawler)",
+            "Hidden-endpoint enumeration via link/form discovery",
+            "Form-parameter inventory (input/textarea/select/button names)",
+            "Pre-flight for SQLi / XSS / auth-bypass hunting on discovered endpoints",
+        ],
+    ),
+    Tool(
+        key="docs_downloader",
+        name="Docs downloader (offline payload vault, BSCP exam prep)",
+        script="docs_downloader.py",
+        description=(
+            "Crawls a docs site / wiki / blog / GitHub README directory "
+            "and saves each page as CLEAN plain text in a local "
+            "directory. Strips scripts/styles/nav chrome - leaves the "
+            "prose. Build BEFORE the exam, grep DURING the exam. "
+            "Bypasses Burp on purpose (speed + clean proxy history). "
+            "Sanitizes URLs to safe Linux filenames so recursive "
+            "directory writes don't break."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("url", "Docs URL to crawl  "
+                          "(example: https://portswigger.net/web-security)"),
+            Prompt("--output", "Output directory  (e.g. docs/portswigger)",
+                   kind="path"),
+            Prompt("--max-pages", "Page cap  (default 500)",
+                   default="500", required=False),
+        ],
+        category="analysis",
+        vulnerabilities=[
+            "Reference building for ALL vuln classes - the vault you grep "
+            "during the exam to find the exact syntax for the payload you need",
+        ],
+    ),
+    Tool(
         key="exploit_server",
         name="Exploit server (host payloads + tunnel for victim browser)",
         script="exploit_server.py",

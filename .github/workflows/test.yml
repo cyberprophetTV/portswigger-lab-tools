@@ -51,6 +51,8 @@ jobs:
           python3 response_diff.py --help > /dev/null
           python3 cheatsheet.py --help > /dev/null
           python3 cheatsheet.py search jwt > /dev/null
+          python3 proxy_spider.py --help > /dev/null
+          python3 docs_downloader.py --help > /dev/null
           python3 workflow.py --help > /dev/null
           python3 workflow.py examples/workflow-login-csrf-fuzz.json --dry-run > /dev/null
           python3 workflow.py examples/workflow-loop-paginate.json --dry-run > /dev/null
