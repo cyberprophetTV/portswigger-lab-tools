@@ -312,6 +312,24 @@ TOOLS: list[Tool] = [
         ],
     ),
     Tool(
+        key="workflow",
+        name="Workflow runner (multi-step + state extraction + fuzz)",
+        script="workflow.py",
+        description=(
+            "Execute a chain of HTTP requests defined in a JSON workflow "
+            "file. Each step can extract values from its response (regex, "
+            "cookie, header, JSON path) into variables that subsequent "
+            "steps reference via {{name}}. The last step can include a "
+            "`fuzz` block that runs sniper-mode fuzzing with all the "
+            "captured state in place. See examples/workflow-login-csrf-fuzz.json."
+        ),
+        lab_url=None,
+        prompts=[
+            Prompt("workflow_file", "Workflow JSON file",
+                   default="examples/workflow-login-csrf-fuzz.json", kind="path"),
+        ],
+    ),
+    Tool(
         key="privesc",
         name="Privilege-escalation / IDOR comparator (dual cookies)",
         script="privesc.py",

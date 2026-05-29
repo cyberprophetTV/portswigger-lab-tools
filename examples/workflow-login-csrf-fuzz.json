@@ -1,0 +1,50 @@
+{
+  "_doc": "Example workflow: log in, fetch a CSRF-protected page, fuzz one of its parameters. Edit base_url to your target. CSRF extractor uses the standard PortSwigger markup; adjust the regex for other sites.",
+
+  "vars": {
+    "base_url": "https://YOUR-LAB-ID.web-security-academy.net"
+  },
+
+  "steps": [
+    {
+      "name": "login",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/login",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "username=wiener&password=peter"
+      },
+      "extract": {
+        "session": {"cookie": "session"}
+      }
+    },
+    {
+      "name": "fetch_csrf",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/my-account"
+      },
+      "extract": {
+        "csrf": {"regex": "name=\"csrf\" value=\"([^\"]+)\""}
+      }
+    },
+    {
+      "name": "fuzz_email_field",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/my-account/change-email",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "csrf={{csrf}}&email=§EMAIL§"
+      },
+      "fuzz": {
+        "payload": "usernames.txt",
+        "match_status": "200",
+        "workers": 5
+      }
+    }
+  ]
+}

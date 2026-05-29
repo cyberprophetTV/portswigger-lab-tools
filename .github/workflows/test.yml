@@ -44,6 +44,8 @@ jobs:
           python3 decode_tool.py --help > /dev/null
           python3 decode_tool.py url --help > /dev/null
           python3 oast_poll.py --help > /dev/null
+          python3 workflow.py --help > /dev/null
+          python3 workflow.py examples/workflow-login-csrf-fuzz.json --dry-run > /dev/null
 
       - name: Smoke-test lab_tools imports
         # Can't actually run lab_tools in CI (interactive prompts),
