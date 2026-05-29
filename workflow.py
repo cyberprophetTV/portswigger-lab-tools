@@ -150,6 +150,15 @@ from urllib.parse import urlparse
 import requests
 import urllib3
 
+# YAML is OPTIONAL. JSON works on a vanilla `pip install requests`;
+# if you prefer hand-editing workflows in YAML (no quotes around
+# every key, comments, block strings) install pyyaml as well.
+try:
+    import yaml
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+
 from intruder import (
     build_session, parse_range_spec, range_matches, Matcher,
     write_json,
@@ -253,6 +262,142 @@ def extract_value(extractor: dict, response: requests.Response) -> str | None:
         return str(data) if data is not None else None
 
     raise ValueError(f"unknown extractor kind: {kind!r}")
+
+
+# ---------------------------------------------------------------------
+# WORKFLOW FILE LOADER (JSON or YAML)
+# ---------------------------------------------------------------------
+def load_workflow_file(path: Path) -> dict:
+    """
+    Load a workflow file. Format inferred from extension:
+       .json          json.loads
+       .yaml / .yml   yaml.safe_load (requires `pip install pyyaml`)
+    Anything else falls back to JSON.
+
+    Why support YAML at all? Workflows with many steps + nested
+    extractors get unwieldy in JSON (every key quoted, no comments,
+    no multi-line strings). YAML reads much better for humans.
+    """
+    text = path.read_text()
+    if path.suffix.lower() in (".yaml", ".yml"):
+        if not _HAS_YAML:
+            sys.exit(f"{tag_err()} YAML workflows need PyYAML. "
+                     f"Install with: pip install pyyaml")
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as e:
+            sys.exit(f"{tag_err()} YAML parse error: {e}")
+    else:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            sys.exit(f"{tag_err()} JSON parse error: {e}")
+    if not isinstance(data, dict):
+        sys.exit(f"{tag_err()} workflow root must be an object/dict, "
+                 f"got {type(data).__name__}")
+    return data
+
+
+# ---------------------------------------------------------------------
+# CONDITIONAL `if:` EVALUATOR
+# ---------------------------------------------------------------------
+# Tiny expression language for the `if:` field on a step. Supports:
+#
+#   "{{var}} == something"      string equality
+#   "{{var}} != something"      string inequality
+#   "{{var}}"                   truthy: non-empty string
+#   "!{{var}}"                  falsy: empty / unset
+#   "{{a}} > 5"                 numeric (>, <, >=, <=) if both sides parse as numbers
+#
+# We deliberately don't add a full expression parser - those tend to
+# accumulate operators and become a security risk. The above five
+# patterns cover 95% of real branching needs; for anything more
+# elaborate, build a workflow that conditionally INCLUDES different
+# sub-workflows.
+def eval_condition(expr: str, vars: dict) -> bool:
+    """
+    Substitute vars into expr, then evaluate as a boolean.
+    Whitespace around operators is tolerated.
+
+    In condition context, ANY leftover {{var}} placeholders that
+    didn't resolve are treated as empty strings - so a condition
+    on a never-set variable returns False (not True from the
+    literal text being non-empty). That's the intuitive behavior
+    for branching on "did we capture this?".
+    """
+    resolved = substitute_str(expr, vars).strip()
+    # Blank out any unresolved {{name}} - treat missing as empty.
+    resolved = VAR_RE.sub("", resolved)
+
+    # Negation prefix: "!{{var}}" - truthy of (not value).
+    negate = False
+    if resolved.startswith("!"):
+        negate = True
+        resolved = resolved[1:].strip()
+
+    # Try each operator longest-first so "==" wins over "=" if we
+    # ever add the latter; ">=" wins over ">", etc.
+    for op in ("==", "!=", ">=", "<=", ">", "<"):
+        if op in resolved:
+            left, _, right = resolved.partition(op)
+            left, right = left.strip(), right.strip()
+            if op == "==":
+                result = left == right
+            elif op == "!=":
+                result = left != right
+            else:
+                # Numeric comparison; treat non-numeric as inequality False.
+                try:
+                    ln, rn = float(left), float(right)
+                except ValueError:
+                    result = False
+                else:
+                    result = {">": ln > rn, "<": ln < rn,
+                              ">=": ln >= rn, "<=": ln <= rn}[op]
+            return (not result) if negate else result
+
+    # No operator: truthy check. Empty string / "0" / "false" -> falsy.
+    truthy = bool(resolved) and resolved.lower() not in ("0", "false", "no")
+    return (not truthy) if negate else truthy
+
+
+# ---------------------------------------------------------------------
+# LOOP DRIVER
+# ---------------------------------------------------------------------
+# A step's `loop:` block tells us to execute the step's body multiple
+# times. Supports two flavors:
+#
+#   {"count": 5}                 fixed N iterations
+#   {"count": 5, "var": "page"}  fixed N, expose iteration index as {{page}}
+#                                (defaults to {{loop_index}} when var omitted)
+#   {"until_status": 200,
+#    "max": 10}                  loop until response status == 200,
+#                                cap at `max` iterations to prevent
+#                                infinite loops on a broken endpoint
+#   {"until_extract": "csrf",
+#    "max": 5}                   loop until variable `csrf` becomes set
+#                                (i.e. step's extractor finally matched)
+#
+# Always bounded - we never iterate without a `count` or `max`. Refusing
+# to spin forever on a server that won't return the expected condition.
+def _loop_iterations(loop_def: dict) -> tuple[int, str]:
+    """Resolve the iteration cap + index variable name."""
+    if "count" in loop_def:
+        return int(loop_def["count"]), loop_def.get("var", "loop_index")
+    if "max" in loop_def:
+        return int(loop_def["max"]), loop_def.get("var", "loop_index")
+    # Default ceiling so we don't spin forever - 10 is a sane "real
+    # workflow" upper bound.
+    return 10, loop_def.get("var", "loop_index")
+
+
+def _loop_should_break(loop_def: dict, response, state: dict) -> bool:
+    """Check the loop's exit condition against the latest response/state."""
+    if "until_status" in loop_def and response is not None:
+        return response.status_code == int(loop_def["until_status"])
+    if "until_extract" in loop_def:
+        return loop_def["until_extract"] in state["vars"]
+    return False
 
 
 # ---------------------------------------------------------------------
@@ -426,10 +571,15 @@ def run_fuzz(session, step: dict, state: dict, dry_run: bool) -> list[dict]:
 # DRIVER
 # ---------------------------------------------------------------------
 def run_workflow(workflow: dict, session: requests.Session,
-                 initial_vars: dict[str, str], dry_run: bool) -> dict:
+                 initial_vars: dict[str, str], dry_run: bool,
+                 _base_path: Path | None = None) -> dict:
     """
     Execute the whole workflow. Returns a summary dict for the JSON
     output (states per step + any fuzz results).
+
+    `_base_path` is used internally for include: directives - it's
+    the directory of the OUTER workflow file so relative includes
+    resolve correctly.
     """
     state = {"vars": {**workflow.get("vars", {}), **initial_vars}}
     print(f"{tag_info()} starting workflow with vars: {sorted(state['vars'])}")
@@ -437,9 +587,92 @@ def run_workflow(workflow: dict, session: requests.Session,
     summary: dict = {"steps": [], "fuzz_results": []}
 
     for step in workflow.get("steps", []):
+        name = step.get("name", "<unnamed>")
+
+        # ---- include: chain another workflow inline ----
+        # Useful for sharing a common "log in" preamble across many
+        # workflows. The included workflow runs through the SAME
+        # session (cookies propagate) and its final state is merged
+        # back into ours.
+        if "include" in step:
+            included_rel = substitute_str(step["include"], state["vars"])
+            included_path = Path(included_rel)
+            if _base_path and not included_path.is_absolute():
+                included_path = _base_path / included_path
+            if not included_path.exists():
+                print(f"{tag_err()} include not found: {included_path}")
+                summary["steps"].append({"name": name, "include": included_rel,
+                                          "error": "file not found"})
+                continue
+            print(cyan(f"=== {name} (include: {included_path}) ==="))
+            try:
+                sub_workflow = load_workflow_file(included_path)
+            except SystemExit:
+                # load_workflow_file already printed a useful error;
+                # don't let it abort the parent workflow.
+                summary["steps"].append({"name": name, "include": included_rel,
+                                          "error": "parse failed"})
+                continue
+            # Step-level `vars` override the included workflow's defaults
+            # (but DON'T pollute the parent state with the overrides -
+            # they're scoped to this include).
+            extra_vars = {**state["vars"], **step.get("vars", {})}
+            sub_summary = run_workflow(sub_workflow, session, extra_vars,
+                                        dry_run, _base_path=included_path.parent)
+            # Merge any vars the sub-workflow extracted back into ours
+            # so subsequent steps can reference them.
+            for k, v in sub_summary.get("final_vars", {}).items():
+                state["vars"][k] = v
+            summary["steps"].append({"name": name, "include": included_rel,
+                                      "sub_steps": sub_summary.get("steps", [])})
+            continue
+
+        # ---- if: skip when condition is false ----
+        if "if" in step:
+            cond = step["if"]
+            if not eval_condition(cond, state["vars"]):
+                resolved = substitute_str(cond, state["vars"])
+                print(cyan(f"=== {name} ==="))
+                print(f"  {dim('[skipped: if ' + cond + ' resolved to ' + resolved + ' = false]')}")
+                summary["steps"].append({"name": name, "skipped": True,
+                                          "if": cond})
+                continue
+
+        # ---- loop: run the step multiple times ----
+        if "loop" in step:
+            loop_def = step["loop"]
+            max_iter, var_name = _loop_iterations(loop_def)
+            iterations_done = 0
+            last_response = None
+            for i in range(max_iter):
+                # Expose the iteration index as a variable so the
+                # step's request can use {{loop_index}} / {{page}}.
+                state["vars"][var_name] = str(i)
+                last_response = run_step(session, step, state, dry_run)
+                iterations_done += 1
+                if _loop_should_break(loop_def, last_response, state):
+                    print(f"  {dim('[loop exit condition met after ' + str(i + 1) + ' iteration(s)]')}")
+                    break
+            else:
+                # Loop ran to its max without the exit condition firing -
+                # might or might not be expected, but worth flagging.
+                if "until_status" in loop_def or "until_extract" in loop_def:
+                    print(f"  {dim('[loop reached max=' + str(max_iter) + ' without satisfying exit condition]')}")
+
+            summary["steps"].append({
+                "name": name,
+                "loop": True,
+                "iterations": iterations_done,
+                "status": getattr(last_response, "status_code", None),
+            })
+            if "fuzz" in step:
+                summary["fuzz_results"] = run_fuzz(session, step, state, dry_run)
+            continue
+
+        # ---- Plain step (the original code path) ----
         response = run_step(session, step, state, dry_run)
         step_record = {
-            "name": step.get("name"),
+            "name": name,
             "status": getattr(response, "status_code", None),
         }
         summary["steps"].append(step_record)
@@ -447,6 +680,9 @@ def run_workflow(workflow: dict, session: requests.Session,
         if "fuzz" in step:
             summary["fuzz_results"] = run_fuzz(session, step, state, dry_run)
 
+    # Expose final state vars so an outer workflow that included
+    # us can merge them back.
+    summary["final_vars"] = dict(state["vars"])
     return summary
 
 
@@ -479,10 +715,7 @@ def main():
 
     if not args.workflow_file.exists():
         sys.exit(f"{tag_err()} workflow file not found: {args.workflow_file}")
-    try:
-        workflow = json.loads(args.workflow_file.read_text())
-    except json.JSONDecodeError as e:
-        sys.exit(f"{tag_err()} workflow file isn't valid JSON: {e}")
+    workflow = load_workflow_file(args.workflow_file)
 
     proxy = args.proxy
     insecure = args.insecure
@@ -504,7 +737,8 @@ def main():
     # step 1 (login) are automatically attached to subsequent steps.
     session = build_session(workers=4, proxy=proxy, insecure=insecure, retries=2)
 
-    summary = run_workflow(workflow, session, initial_vars, args.dry_run)
+    summary = run_workflow(workflow, session, initial_vars, args.dry_run,
+                            _base_path=args.workflow_file.parent)
 
     if args.output:
         write_json([{"workflow_summary": summary}], args.output)

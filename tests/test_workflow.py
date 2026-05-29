@@ -11,6 +11,8 @@ import pytest
 from workflow import (
     substitute_str, substitute_deep, find_unresolved,
     extract_value, parse_var,
+    eval_condition, _loop_iterations, _loop_should_break,
+    load_workflow_file,
 )
 
 
@@ -158,3 +160,129 @@ class TestParseVar:
     def test_missing_equals_exits(self):
         with pytest.raises(SystemExit):
             parse_var("just_name")
+
+
+# ---------------------------------------------------------------------
+# eval_condition  (the if: expression evaluator)
+# ---------------------------------------------------------------------
+class TestEvalCondition:
+    def test_string_equality(self):
+        assert eval_condition("{{role}} == admin", {"role": "admin"})
+        assert not eval_condition("{{role}} == admin", {"role": "user"})
+
+    def test_string_inequality(self):
+        assert eval_condition("{{role}} != user", {"role": "admin"})
+        assert not eval_condition("{{role}} != admin", {"role": "admin"})
+
+    def test_truthy_check(self):
+        # Bare {{var}} returns True when the variable is non-empty.
+        assert eval_condition("{{token}}", {"token": "abc"})
+        assert not eval_condition("{{token}}", {"token": ""})
+        # Unresolved vars are treated as empty in condition context
+        # (intuitive for "did this step extract anything?" checks).
+        assert not eval_condition("{{token}}", {})
+
+    def test_truthy_zero_and_false_treated_as_false(self):
+        assert not eval_condition("{{x}}", {"x": "0"})
+        assert not eval_condition("{{x}}", {"x": "false"})
+        assert not eval_condition("{{x}}", {"x": "no"})
+        # Case-insensitive
+        assert not eval_condition("{{x}}", {"x": "FALSE"})
+
+    def test_negation(self):
+        assert eval_condition("!{{role}}", {"role": ""})
+        assert eval_condition("!{{x}}", {"x": "0"})
+        assert not eval_condition("!{{role}}", {"role": "admin"})
+
+    def test_numeric_comparison(self):
+        assert eval_condition("{{n}} > 5", {"n": "10"})
+        assert eval_condition("{{n}} < 5", {"n": "3"})
+        assert eval_condition("{{n}} >= 5", {"n": "5"})
+        assert eval_condition("{{n}} <= 5", {"n": "5"})
+        assert not eval_condition("{{n}} > 5", {"n": "3"})
+
+    def test_numeric_compare_with_non_number(self):
+        # Non-numeric sides should produce False, not crash.
+        assert not eval_condition("{{n}} > 5", {"n": "not a number"})
+
+    def test_operator_whitespace_tolerated(self):
+        assert eval_condition("{{a}}==x", {"a": "x"})
+        assert eval_condition("{{a}}  ==  x", {"a": "x"})
+
+
+# ---------------------------------------------------------------------
+# Loop helpers
+# ---------------------------------------------------------------------
+class TestLoopIterations:
+    def test_count_explicit(self):
+        cap, var = _loop_iterations({"count": 5})
+        assert cap == 5
+        assert var == "loop_index"
+
+    def test_count_with_var(self):
+        cap, var = _loop_iterations({"count": 3, "var": "page"})
+        assert (cap, var) == (3, "page")
+
+    def test_max_used_when_no_count(self):
+        cap, _ = _loop_iterations({"max": 8, "until_status": 200})
+        assert cap == 8
+
+    def test_default_ceiling_when_neither(self):
+        # An until_X loop with no max defaults to a sane upper bound
+        # so we never spin forever.
+        cap, _ = _loop_iterations({"until_status": 200})
+        assert cap == 10
+
+
+class TestLoopShouldBreak:
+    class _R:
+        def __init__(self, sc):
+            self.status_code = sc
+
+    def test_until_status_breaks_on_match(self):
+        assert _loop_should_break({"until_status": 200},
+                                    self._R(200), {"vars": {}})
+        assert not _loop_should_break({"until_status": 200},
+                                        self._R(404), {"vars": {}})
+
+    def test_until_extract_breaks_when_var_set(self):
+        assert _loop_should_break({"until_extract": "csrf"},
+                                    None, {"vars": {"csrf": "abc"}})
+        assert not _loop_should_break({"until_extract": "csrf"},
+                                        None, {"vars": {}})
+
+    def test_no_exit_condition_never_breaks(self):
+        assert not _loop_should_break({"count": 3}, self._R(200),
+                                        {"vars": {}})
+
+
+# ---------------------------------------------------------------------
+# load_workflow_file
+# ---------------------------------------------------------------------
+class TestLoadWorkflowFile:
+    def test_loads_json(self, tmp_path):
+        p = tmp_path / "wf.json"
+        p.write_text(json.dumps({"vars": {"x": "y"}, "steps": []}))
+        wf = load_workflow_file(p)
+        assert wf["vars"]["x"] == "y"
+
+    def test_invalid_json_exits(self, tmp_path):
+        p = tmp_path / "bad.json"
+        p.write_text("{ not valid")
+        with pytest.raises(SystemExit):
+            load_workflow_file(p)
+
+    def test_root_must_be_dict(self, tmp_path):
+        p = tmp_path / "wf.json"
+        p.write_text(json.dumps([1, 2, 3]))
+        with pytest.raises(SystemExit):
+            load_workflow_file(p)
+
+    def test_yaml_when_available(self, tmp_path):
+        # Skip if pyyaml isn't installed locally - we don't want this
+        # to fail on minimal environments. CI installs pyyaml.
+        pytest.importorskip("yaml")
+        p = tmp_path / "wf.yaml"
+        p.write_text("vars:\n  x: y\nsteps: []\n")
+        wf = load_workflow_file(p)
+        assert wf["vars"]["x"] == "y"
