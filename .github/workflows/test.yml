@@ -48,6 +48,7 @@ jobs:
           python3 exploit_server.py --help > /dev/null
           python3 exploit_server.py serve --help > /dev/null
           bash bscp-setup.sh --check || true   # may report missing deps; that's OK
+          python3 response_diff.py --help > /dev/null
           python3 workflow.py --help > /dev/null
           python3 workflow.py examples/workflow-login-csrf-fuzz.json --dry-run > /dev/null
           python3 workflow.py examples/workflow-loop-paginate.json --dry-run > /dev/null
