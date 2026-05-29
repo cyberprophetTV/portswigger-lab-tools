@@ -1,10 +1,19 @@
 """
 Tests for docs_downloader.py - HTML-to-text + URL-to-filename
-sanitization. Network code is exercised manually.
+sanitization + critical-content filtering. Network code is
+exercised manually.
 """
 from pathlib import Path
 
-from docs_downloader import html_to_text, url_to_path
+from docs_downloader import (
+    html_to_text,
+    url_to_path,
+    is_critical_url,
+    is_critical_text,
+    is_critical,
+    CRITICAL_URL_PATTERNS,
+    CRITICAL_KEYWORDS,
+)
 
 
 class TestHtmlToText:
@@ -132,3 +141,133 @@ class TestUrlToPath:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("hello")
         assert out.read_text() == "hello"
+
+
+# -------------------------------------------------------------------
+# Critical-content filter: the "only save vuln-relevant pages" mode
+# -------------------------------------------------------------------
+class TestIsCriticalUrl:
+    def test_matches_obvious_vuln_path(self):
+        url = "https://portswigger.net/web-security/sql-injection"
+        assert is_critical_url(url, CRITICAL_URL_PATTERNS)
+
+    def test_matches_xss_path(self):
+        url = "https://portswigger.net/web-security/cross-site-scripting"
+        assert is_critical_url(url, CRITICAL_URL_PATTERNS)
+
+    def test_matches_partial_substring(self):
+        # 'vulnerab' substring matches 'vulnerability', 'vulnerabilities', etc.
+        url = "https://example.com/docs/vulnerabilities/top-10"
+        assert is_critical_url(url, CRITICAL_URL_PATTERNS)
+
+    def test_case_insensitive(self):
+        url = "https://example.com/Web-Security/SQL-Injection"
+        assert is_critical_url(url, CRITICAL_URL_PATTERNS)
+
+    def test_no_match_on_marketing_page(self):
+        url = "https://portswigger.net/about/pricing"
+        # 'about' / 'pricing' are not in the vuln keyword list
+        assert not is_critical_url(url, CRITICAL_URL_PATTERNS)
+
+    def test_no_match_on_blog_root(self):
+        url = "https://example.com/blog/2025"
+        assert not is_critical_url(url, CRITICAL_URL_PATTERNS)
+
+    def test_custom_patterns_override(self):
+        url = "https://example.com/labs/race-condition-1"
+        # Default list doesn't include "/labs/" by name; user can pass their own
+        assert is_critical_url(url, ["/labs/"])
+
+    def test_empty_pattern_list_matches_nothing(self):
+        url = "https://example.com/sql-injection"
+        # With no patterns provided, nothing should match (we shouldn't crash)
+        assert not is_critical_url(url, [])
+
+
+class TestIsCriticalText:
+    def test_matches_sql_injection_in_body(self):
+        text = "This article explains how SQL injection works"
+        assert is_critical_text(text, CRITICAL_KEYWORDS)
+
+    def test_matches_xss_phrase(self):
+        text = "Cross-site scripting is a client-side vulnerability"
+        assert is_critical_text(text, CRITICAL_KEYWORDS)
+
+    def test_case_insensitive(self):
+        text = "JSON Web Token implementations often have flaws"
+        assert is_critical_text(text, CRITICAL_KEYWORDS)
+
+    def test_no_match_on_marketing_copy(self):
+        text = "Our world-class team delivers tailored solutions for enterprise customers."
+        assert not is_critical_text(text, CRITICAL_KEYWORDS)
+
+    def test_custom_keywords_override(self):
+        text = "GraphQL introspection enumeration"
+        assert is_critical_text(text, ["graphql"])
+
+    def test_empty_keywords_matches_nothing(self):
+        text = "this is full of sql injection xxe rce"
+        assert not is_critical_text(text, [])
+
+
+class TestIsCritical:
+    def test_url_match_short_circuits(self):
+        # URL matches even if body is generic - still critical
+        keep, reason = is_critical(
+            "https://example.com/sql-injection/cheatsheet",
+            "Some generic prose without vuln-specific words.",
+            CRITICAL_URL_PATTERNS,
+            CRITICAL_KEYWORDS,
+        )
+        assert keep is True
+        assert "URL" in reason
+
+    def test_text_match_when_url_is_generic(self):
+        # URL doesn't look vuln-y but the body talks about SQL injection
+        keep, reason = is_critical(
+            "https://example.com/blog/post-12345",
+            "This week we look at SQL injection in production.",
+            CRITICAL_URL_PATTERNS,
+            CRITICAL_KEYWORDS,
+        )
+        assert keep is True
+        assert "keyword" in reason or "body" in reason
+
+    def test_both_fail_is_not_critical(self):
+        keep, reason = is_critical(
+            "https://example.com/about/team",
+            "Meet our founders and learn about our mission.",
+            CRITICAL_URL_PATTERNS,
+            CRITICAL_KEYWORDS,
+        )
+        assert keep is False
+        assert reason  # Non-empty explanation
+
+    def test_returns_tuple_shape(self):
+        result = is_critical(
+            "https://example.com/x", "y",
+            CRITICAL_URL_PATTERNS, CRITICAL_KEYWORDS,
+        )
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert isinstance(result[0], bool)
+        assert isinstance(result[1], str)
+
+
+class TestCriticalListsAreNonEmpty:
+    """Guard against accidentally clearing the curated lists."""
+    def test_url_patterns_populated(self):
+        assert len(CRITICAL_URL_PATTERNS) > 20
+
+    def test_keywords_populated(self):
+        assert len(CRITICAL_KEYWORDS) > 20
+
+    def test_url_patterns_are_lowercase(self):
+        # Filter logic lowercases the URL path then does substring
+        # `in` checks, so patterns themselves must be lowercase.
+        for p in CRITICAL_URL_PATTERNS:
+            assert p == p.lower(), f"non-lowercase pattern: {p!r}"
+
+    def test_keywords_are_lowercase(self):
+        for k in CRITICAL_KEYWORDS:
+            assert k == k.lower(), f"non-lowercase keyword: {k!r}"

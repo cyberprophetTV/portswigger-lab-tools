@@ -32,6 +32,22 @@ Build the vault BEFORE the exam:
 Then DURING the exam, instant lookup:
   grep -ri 'time-based' docs/portswigger/ | head -20
 
+TWO FILTER MODES
+----------------
+Use `--filter critical` to grab ONLY exam/vuln-relevant pages
+(skips "About us", "Pricing", "Customer Stories", marketing pages,
+etc.). Use the default `--filter all` to mirror everything.
+
+  python3 docs_downloader.py https://portswigger.net/web-security \\
+      --output docs/portswigger --filter critical    # focused vault
+  python3 docs_downloader.py https://portswigger.net/web-security \\
+      --output docs/portswigger --filter all         # full mirror
+
+Tune what counts as "critical" with `--filter-words` (text body
+match) or `--filter-url-pattern` (URL path match). Use `--dry-run`
+to preview WITHOUT writing files - lets you tune the filter
+before a long crawl.
+
 WHY THIS BYPASSES BURP (intentional)
 ------------------------------------
 This tool does NOT route through Burp's proxy. Reasons:
@@ -100,6 +116,93 @@ from _common import (
 )
 from _ratelimit import RateLimiter
 from proxy_spider import extract_urls, in_scope
+
+
+# ---------------------------------------------------------------------
+# CRITICAL-CONTENT FILTERING (the "only the pages you need" mode)
+# =====================================================================
+# When --filter critical is set, we save a page ONLY if it looks
+# security/vuln-relevant. Pages are still CRAWLED (we extract URLs
+# from them so we can reach nested critical pages buried under a
+# non-critical hub) - just not WRITTEN to disk.
+#
+# Two layers, OR'd:
+#   1. URL path contains any CRITICAL_URL_PATTERN (cheap, fast)
+#   2. Stripped page text contains any CRITICAL_KEYWORD (slower but
+#      catches "Security" articles whose URL doesn't make the topic
+#      obvious)
+#
+# Override either with --filter-url-pattern / --filter-words for
+# domain-specific tuning.
+
+# Substrings that, when present in a URL path, mark the page as
+# critical even before fetching. Lowercased for case-insensitive
+# `in` comparison.
+CRITICAL_URL_PATTERNS = [
+    "security", "vulnerab", "exploit", "payload", "injection",
+    "attack", "xss", "csrf", "ssrf", "xxe", "ssti", "sqli",
+    "deseriali", "traversal", "auth", "idor", "jwt", "oauth",
+    "smuggl", "cors", "csp", "cache", "redirect", "upload",
+    "command-inj", "os-command", "template-inj", "ldap",
+    "nosql", "graphql", "race", "broken-access", "directory",
+    "file-inclusion", "lfi", "rfi", "mass-assign",
+    "param-pollut", "host-header", "session", "privilege",
+    "escalation", "bypass", "cve-",
+]
+
+# Keywords that, when present in the page's stripped text content,
+# mark the page as critical. Case-insensitive substring match.
+# Tuned for what PortSwigger Academy / OWASP / HackTricks-style
+# vuln write-ups typically contain.
+CRITICAL_KEYWORDS = [
+    # Vulnerability classes
+    "sql injection", "cross-site scripting", "cross-site request forgery",
+    "server-side request forgery", "xml external entity",
+    "server-side template injection", "command injection", "path traversal",
+    "directory traversal", "file inclusion", "deserialization",
+    "broken access control", "broken authentication",
+    "request smuggling", "cache poisoning", "open redirect",
+    "ldap injection", "nosql injection",
+    "mass assignment", "parameter pollution", "host header",
+    "race condition", "session fixation", "session hijacking",
+    "privilege escalation", "idor",
+    "json web token", "algorithm confusion", "alg=none",
+    # Attack techniques
+    "blind injection", "time-based", "boolean-based", "union-based",
+    "out-of-band", "oast", "collaborator",
+    "stored xss", "reflected xss", "dom xss",
+    "polyglot", "payload",
+    # Concepts that show up in vuln write-ups
+    "vulnerability", "exploit", "bypass", "lab solution",
+    "content security policy", "samesite", "httponly", "csrf token",
+    "cors", "cve-",
+]
+
+
+def is_critical_url(url: str, url_patterns: list[str]) -> bool:
+    """True if the URL path contains any critical pattern."""
+    path_lower = urllib.parse.urlparse(url).path.lower()
+    return any(p in path_lower for p in url_patterns)
+
+
+def is_critical_text(text: str, keywords: list[str]) -> bool:
+    """True if the stripped page text contains any critical keyword."""
+    text_lower = text.lower()
+    return any(k in text_lower for k in keywords)
+
+
+def is_critical(url: str, text: str,
+                 url_patterns: list[str], keywords: list[str]) -> tuple[bool, str]:
+    """
+    Compose URL + text checks. Returns (is_critical, reason). The
+    reason string is shown in the log so the user understands WHY a
+    page was kept or skipped.
+    """
+    if is_critical_url(url, url_patterns):
+        return True, "URL pattern match"
+    if is_critical_text(text, keywords):
+        return True, "keyword match in body"
+    return False, "no critical signal"
 
 
 # ---------------------------------------------------------------------
@@ -241,11 +344,28 @@ def download(args, session: requests.Session) -> dict:
     frontier: deque[tuple[str, int]] = deque([(args.url, 0)])
     rate_limiter = RateLimiter(max_rps=args.max_rps)
 
+    # Resolve final filter lists - CLI overrides take precedence.
+    url_patterns = (args.filter_url_pattern.split(",") if args.filter_url_pattern
+                     else CRITICAL_URL_PATTERNS)
+    keywords = (args.filter_words.split(",") if args.filter_words
+                else CRITICAL_KEYWORDS)
+    url_patterns = [p.strip().lower() for p in url_patterns if p.strip()]
+    keywords = [k.strip().lower() for k in keywords if k.strip()]
+
     print(f"{tag_info()} start: {bold(args.url)}")
     print(f"{tag_info()} output dir: {bold(str(args.output))}")
     print(f"{tag_info()} bypassing proxy (intentional - speed + cleanliness)")
+    print(f"{tag_info()} filter mode: {bold(args.filter)}", end="")
+    if args.filter == "critical":
+        print(f"  ({len(url_patterns)} URL patterns, {len(keywords)} keywords)")
+    else:
+        print("  (save every page)")
+    if args.dry_run:
+        print(f"{tag_warn()} dry-run: NO files will be written")
     print(f"{tag_info()} limits: max-pages={args.max_pages} depth={args.max_depth} workers={args.workers}")
     print()
+
+    skipped_filter = 0
 
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -284,18 +404,45 @@ def download(args, session: requests.Session) -> dict:
                     print(f"  [{status}]  skipping (HTTP error)  {url}")
                     continue
 
-                # Save cleaned text
+                # Strip to plain text before the critical-filter decision
+                # (URL might not look critical but body text might mention
+                # "SQL injection" - we still want to keep it).
                 text = html_to_text(body)
                 out_path = url_to_path(url, args.output)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(text, encoding="utf-8")
-                saved.append((url, out_path))
-                print(f"  [{status}]  saved -> {dim(str(out_path))}")
 
-                # Optionally save raw HTML alongside
-                if args.save_html:
-                    html_path = out_path.with_suffix(".html")
-                    html_path.write_text(body, encoding="utf-8", errors="replace")
+                # Filter decision
+                if args.filter == "critical":
+                    keep, reason = is_critical(url, text, url_patterns, keywords)
+                    if not keep:
+                        skipped_filter += 1
+                        print(f"  [{status}]  {dim('skip-filter')}  {url}  "
+                              f"{dim('(' + reason + ')')}")
+                        # IMPORTANT: still extract URLs + queue them so we
+                        # can reach critical pages buried under non-critical
+                        # hub pages.
+                        if depth < args.max_depth:
+                            for new_url in extract_urls(body, url):
+                                if new_url in visited:
+                                    continue
+                                if not in_scope(new_url, base_host, args):
+                                    continue
+                                frontier.append((new_url, depth + 1))
+                        continue
+                    log_reason = f" ({reason})"
+                else:
+                    log_reason = ""
+
+                if args.dry_run:
+                    print(f"  [{status}]  would-save  {url}{log_reason}")
+                    saved.append((url, out_path))
+                else:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(text, encoding="utf-8")
+                    saved.append((url, out_path))
+                    print(f"  [{status}]  saved -> {dim(str(out_path))}{log_reason}")
+                    if args.save_html:
+                        html_path = out_path.with_suffix(".html")
+                        html_path.write_text(body, encoding="utf-8", errors="replace")
 
                 # Queue new URLs that are in-scope + below max depth
                 if depth < args.max_depth:
@@ -348,6 +495,29 @@ def main():
                          "(e.g. --exclude-path /api/  to skip noisy API pages)")
     ap.add_argument("--max-pages", type=int, default=500)
     ap.add_argument("--max-depth", type=int, default=6)
+
+    # Filter mode - the headline feature.
+    ap.add_argument("--filter", choices=["all", "critical"], default="all",
+                    help="all: save every in-scope page (default, current behavior). "
+                         "critical: only save pages whose URL or text content looks "
+                         "vuln/exam-relevant. Non-critical pages are still CRAWLED "
+                         "(their URLs feed the frontier) but not written to disk - "
+                         "so a non-critical hub linking to critical leaf pages still "
+                         "works.")
+    ap.add_argument("--filter-words", default="",
+                    help="Comma-separated list of keywords to OVERRIDE the built-in "
+                         "CRITICAL_KEYWORDS list. Match is case-insensitive substring "
+                         "against the stripped page text. "
+                         "Example: --filter-words 'jwt,oauth,saml'")
+    ap.add_argument("--filter-url-pattern", default="",
+                    help="Comma-separated list of substrings to OVERRIDE the built-in "
+                         "CRITICAL_URL_PATTERNS list. Match is case-insensitive against "
+                         "the URL path. "
+                         "Example: --filter-url-pattern '/labs/,/cheatsheet/'")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Show what WOULD be saved without writing any files. "
+                         "Useful for tuning --filter-words / --filter-url-pattern "
+                         "before committing to a big crawl.")
 
     # Behavior
     ap.add_argument("--save-html", action="store_true",

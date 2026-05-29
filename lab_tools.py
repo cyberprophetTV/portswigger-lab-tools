@@ -454,6 +454,11 @@ TOOLS: list[Tool] = [
                           "(example: https://portswigger.net/web-security)"),
             Prompt("--output", "Output directory  (e.g. docs/portswigger)",
                    kind="path"),
+            Prompt("--filter",
+                   "Filter mode  "
+                   "(critical = only vuln/exam pages; all = everything in scope)",
+                   default="critical", kind="select",
+                   choices=["critical", "all"]),
             Prompt("--max-pages", "Page cap  (default 500)",
                    default="500", required=False),
         ],
