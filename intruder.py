@@ -195,6 +195,7 @@ from _common import (
     progress, bold, dim,
 )
 from _ratelimit import RateLimiter
+from _truncate import compact_response
 
 
 # ---------------------------------------------------------------------
@@ -1022,6 +1023,19 @@ class FuzzConfig:
     # the human-readable [HIT]/[   ] lines. For piping to jq, feeding
     # to AI orchestrators, parsing in downstream scripts.
     json_output: bool = False
+    # Include response body in each result (off by default - bodies
+    # are big). When on, body is run through compact_response (strip
+    # scripts/styles/SVG/comments, collapse whitespace, truncate).
+    include_body: bool = False
+    truncate_body: int = 5000              # hard cap on body chars; 0 = no cap
+    # Baseline-time matching: if >0, send this many baseline probes
+    # at startup (template with markers replaced by empty strings)
+    # to establish a mean baseline response time. Then any response
+    # at least `match_time_delta` seconds slower than baseline
+    # counts as a hit. Designed to flag time-based blind SQLi /
+    # OS command injection.
+    baseline_samples: int = 0
+    match_time_delta: float = 0.0
 
 
 # =====================================================================
@@ -1099,6 +1113,33 @@ def fuzz(cfg: FuzzConfig) -> None:
     # ---- Rate limiter (proactive cap + reactive 429 backoff) ----
     rate_limiter = RateLimiter(max_rps=cfg.max_rps)
 
+    # ---- Baseline timing (for time-based blind detection) ----
+    # Send a few requests with markers blanked out so we know the
+    # server's "normal" response time. Time-based SQLi like
+    # `' OR SLEEP(5)--` should land >= baseline + 5s; that's the
+    # signal --match-time-delta uses.
+    baseline_time = 0.0
+    if cfg.baseline_samples > 0:
+        _log(f"{tag_info()} measuring baseline response time "
+             f"({cfg.baseline_samples} samples)")
+        baseline_session = shared or build_session(
+            1, cfg.proxy, cfg.insecure, cfg.retries, cookies=cfg.cookies)
+        # Substitute every marker with empty string for a "shape but
+        # no payload" request.
+        baseline_req = template.substituted([""] * n_markers)
+        times = []
+        for _ in range(cfg.baseline_samples):
+            try:
+                _r, t = send(baseline_session, baseline_req, host, scheme)
+                times.append(t)
+            except requests.exceptions.RequestException:
+                pass
+        if times:
+            baseline_time = sum(times) / len(times)
+            _log(f"{tag_info()} baseline mean response time: {baseline_time*1000:.1f} ms")
+        else:
+            _log(f"{tag_warn()} all baseline probes failed; --match-time-delta disabled")
+
     results = []
     first_hit_dumped = False
 
@@ -1166,10 +1207,18 @@ def fuzz(cfg: FuzzConfig) -> None:
                         reflected = True
                         break
 
+            # ---- Time-delta calculation (for blind-time detection) ----
+            time_delta = elapsed - baseline_time if baseline_time > 0 else 0.0
+
             if err:
                 hit = False
             else:
                 hit = cfg.matcher.matches(status, length, body, elapsed)
+                # If --match-time-delta is set, require the delta gate too.
+                # AND semantics, consistent with how the other matchers
+                # combine inside Matcher.matches.
+                if cfg.match_time_delta > 0:
+                    hit = hit and (time_delta >= cfg.match_time_delta)
 
             if cfg.json_output:
                 # NDJSON line per result. Suppress the human-readable
@@ -1186,6 +1235,13 @@ def fuzz(cfg: FuzzConfig) -> None:
                     line["reflected"] = reflected
                 if cfg.oob_host:
                     line["oob_id"] = oob_id
+                if baseline_time > 0:
+                    line["time_delta"] = round(time_delta, 4)
+                if cfg.include_body and body:
+                    # Strip scripts/styles/svg and truncate. Keeps
+                    # JSON small enough for LLM context windows and
+                    # for human review.
+                    line["body"] = compact_response(body, cfg.truncate_body)
                 # json.dumps handles None / weird chars safely. flush
                 # so consumers (jq, AI orchestrators) see lines as
                 # they're produced, not all at once at the end.
@@ -1196,8 +1252,11 @@ def fuzz(cfg: FuzzConfig) -> None:
                 elif hit or cfg.verbose or not cfg.matcher.any_enabled():
                     flag = tag_hit() if hit else tag_miss()
                     refl = "  REFLECTED" if reflected else ""
+                    delta = (f"  (Δ {time_delta*1000:+.0f}ms)"
+                             if baseline_time > 0 and abs(time_delta) > 0.05
+                             else "")
                     print(f"{flag} {label}  status={status} len={length} "
-                          f"time={elapsed:.2f}s{refl}")
+                          f"time={elapsed:.2f}s{delta}{refl}")
 
                 # Dump full first hit when --verbose: invaluable for
                 # spotting "oh I substituted in the wrong place" bugs.
@@ -1322,6 +1381,27 @@ def main():
                          "instead of human-readable [HIT] lines. Suppresses "
                          "the colored output entirely - intended for piping "
                          "to `jq` or to an AI orchestration layer.")
+    ap.add_argument("--include-body", action="store_true",
+                    help="With --json, include the response body in each "
+                         "result. Body is passed through compact_response "
+                         "(strip script/style/svg/comments, collapse "
+                         "whitespace, truncate) before serializing.")
+    ap.add_argument("--truncate-body", type=int, default=5000, metavar="N",
+                    help="Max characters of body to include with --include-body "
+                         "(default 5000). 0 = no truncation. Keeps LLM context "
+                         "manageable - 5000 chars is roughly 1.5 KB of compact "
+                         "HTML once noise is stripped.")
+    # ---- Time-based blind detection ----
+    ap.add_argument("--baseline-samples", type=int, default=0, metavar="N",
+                    help="Send N requests at startup with markers blanked to "
+                         "measure the server's baseline response time. Enables "
+                         "--match-time-delta. Reasonable: 3-5 samples.")
+    ap.add_argument("--match-time-delta", type=float, default=0.0, metavar="SEC",
+                    help="Flag responses at least SEC seconds slower than "
+                         "baseline as hits. Pair with --baseline-samples. "
+                         "Designed to catch time-based blind SQLi / OS command "
+                         "injection (e.g. --match-time-delta 4 for SLEEP(5) "
+                         "payloads).")
     # ---- Stealth / session (same set as username_enum_solver.py) ----
     ap.add_argument("--workers", type=int, default=10,
                     help="Concurrent requests (default 10)")
@@ -1465,6 +1545,10 @@ def main():
         oob_host=args.oob_host,
         max_rps=args.max_rps,
         json_output=args.json_output,
+        include_body=args.include_body,
+        truncate_body=args.truncate_body,
+        baseline_samples=args.baseline_samples,
+        match_time_delta=args.match_time_delta,
     )
 
     fuzz(cfg)
