@@ -1,0 +1,45 @@
+{
+  "_doc": "The 'session pinning logout trap'. Some servers don't issue a new session cookie on login - they associate the existing cookie with whichever user logged in last. So logging in as User B with cookies from User A's session can leave you authenticated as A (or some confused mix). Fix: explicit `clear_cookies: true` between identities, before the second login.",
+
+  "vars": {
+    "base_url": "https://YOUR-LAB.web-security-academy.net"
+  },
+
+  "steps": [
+    {
+      "name": "login_as_user_a",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/login",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "username=wiener&password=peter"
+      }
+    },
+
+    {
+      "name": "do_something_as_user_a",
+      "request": {"method": "GET", "url": "{{base_url}}/my-account"}
+    },
+
+    {
+      "_comment": "EXPLICIT identity-switch boundary. No request, just wipes the session jar. Without this, the next login may reuse User A's session cookie even though the body says 'username=carlos'.",
+      "name": "switch_identity",
+      "clear_cookies": true
+    },
+
+    {
+      "name": "login_as_user_b",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/login",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "username=carlos&password=montoya"
+      }
+    },
+
+    {
+      "name": "do_something_as_user_b",
+      "request": {"method": "GET", "url": "{{base_url}}/my-account"}
+    }
+  ]
+}

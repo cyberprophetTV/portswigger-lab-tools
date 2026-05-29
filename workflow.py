@@ -429,9 +429,33 @@ def run_step(session, step: dict, state: dict, dry_run: bool) -> requests.Respon
     """
     Execute one step: substitute variables, send request, run extractors.
     Returns the Response (or None if dry-run).
+
+    Special step options:
+      `clear_cookies: true`  Clear ALL cookies on the shared Session
+                             before sending. Use when switching identities
+                             (logout-as-A then login-as-B) on servers that
+                             quietly re-use the same session ID across
+                             users - aka the "session pinning logout trap".
     """
     name = step.get("name", "<unnamed>")
     print(cyan(f"=== {name} ==="))
+
+    # ---- clear_cookies: wipe the session jar before this step ----
+    # Done BEFORE substitution / sending so the request goes out
+    # with no cookies (and any extraction step + Set-Cookie response
+    # creates a genuinely fresh session).
+    if step.get("clear_cookies"):
+        n = len(session.cookies)
+        if not dry_run:
+            session.cookies.clear()
+        print(f"  {tag_info()} cleared {n} cookie(s) from session "
+              f"(force-fresh login)")
+
+    # A step is allowed to have NO `request` block - useful when its
+    # only job is to mutate state (e.g. clear_cookies-only "switch
+    # identity" markers). Return early in that case.
+    if "request" not in step:
+        return None
 
     raw_request = step.get("request", {})
     resolved = substitute_deep(raw_request, state["vars"])
@@ -642,12 +666,24 @@ def run_workflow(workflow: dict, session: requests.Session,
         if "loop" in step:
             loop_def = step["loop"]
             max_iter, var_name = _loop_iterations(loop_def)
+            # `refresh` is a list of mini-steps run BEFORE EACH iteration.
+            # Use case: re-fetch a single-use CSRF token (or any other
+            # per-request state) so the main step's request always has
+            # fresh values for {{csrf}}, {{nonce}}, {{anti_replay}}, etc.
+            refresh_steps = step.get("refresh") or []
+            if refresh_steps and not isinstance(refresh_steps, list):
+                refresh_steps = [refresh_steps]
             iterations_done = 0
             last_response = None
             for i in range(max_iter):
                 # Expose the iteration index as a variable so the
                 # step's request can use {{loop_index}} / {{page}}.
                 state["vars"][var_name] = str(i)
+                # Re-run any refresh sub-steps to capture fresh state.
+                # Critical for single-use CSRF tokens: each fuzz iteration
+                # must use a token that hasn't been consumed yet.
+                for r_step in refresh_steps:
+                    run_step(session, r_step, state, dry_run)
                 last_response = run_step(session, step, state, dry_run)
                 iterations_done += 1
                 if _loop_should_break(loop_def, last_response, state):

@@ -1,0 +1,43 @@
+{
+  "_doc": "Single-use CSRF tokens get consumed by the first submission. Looping a fuzz step that uses {{csrf}} fails on iteration 2+ because the token's already burnt. Fix: `refresh` block on the loop step re-fetches a fresh token before EACH iteration.",
+
+  "vars": {
+    "base_url": "https://YOUR-LAB.web-security-academy.net"
+  },
+
+  "steps": [
+    {
+      "name": "login",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/login",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "username=wiener&password=peter"
+      }
+    },
+
+    {
+      "_comment": "The MAIN loop step. `refresh` re-fetches the CSRF token before each iteration so {{csrf}} is always fresh. Without `refresh`, iterations 2-N would all reuse the iteration-1 token and get rejected.",
+      "name": "fuzz_each_payload_with_fresh_csrf",
+      "loop": {"count": 50, "var": "i"},
+      "refresh": [
+        {
+          "name": "_fetch_fresh_csrf",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/my-account"
+          },
+          "extract": {
+            "csrf": {"regex": "name=\"csrf\" value=\"([^\"]+)\""}
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/my-account/change-email",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "csrf={{csrf}}&email=test{{i}}@example.com"
+      }
+    }
+  ]
+}

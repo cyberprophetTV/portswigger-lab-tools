@@ -56,6 +56,8 @@ jobs:
           python3 workflow.py examples/workflow-include-shared-auth.json --dry-run > /dev/null
           python3 workflow.py examples/workflow-yaml-readable.yaml --dry-run > /dev/null
           python3 workflow.py examples/workflow-cross-app-ssrf.json --dry-run > /dev/null
+          python3 workflow.py examples/workflow-csrf-refresh-loop.json --dry-run > /dev/null
+          python3 workflow.py examples/workflow-identity-switch.json --dry-run > /dev/null
 
       - name: Smoke-test lab_tools imports
         # Can't actually run lab_tools in CI (interactive prompts),

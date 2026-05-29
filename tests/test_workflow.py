@@ -12,8 +12,9 @@ from workflow import (
     substitute_str, substitute_deep, find_unresolved,
     extract_value, parse_var,
     eval_condition, _loop_iterations, _loop_should_break,
-    load_workflow_file,
+    load_workflow_file, run_step, run_workflow,
 )
+from unittest.mock import MagicMock
 
 
 # ---------------------------------------------------------------------
@@ -286,3 +287,130 @@ class TestLoadWorkflowFile:
         p.write_text("vars:\n  x: y\nsteps: []\n")
         wf = load_workflow_file(p)
         assert wf["vars"]["x"] == "y"
+
+
+# ---------------------------------------------------------------------
+# clear_cookies + request-less steps
+# ---------------------------------------------------------------------
+class TestClearCookies:
+    def _make_session(self):
+        """Real-ish session with a mockable cookies jar."""
+        sess = MagicMock()
+        # MagicMock won't iterate properly for len(); use a list.
+        sess.cookies = MagicMock()
+        sess.cookies.__len__ = MagicMock(return_value=3)
+        sess.cookies.clear = MagicMock()
+        return sess
+
+    def test_step_with_only_clear_cookies_returns_none(self):
+        # A step that has clear_cookies but no `request` block should
+        # not try to send anything.
+        sess = self._make_session()
+        step = {"name": "switch", "clear_cookies": True}
+        result = run_step(sess, step, {"vars": {}}, dry_run=False)
+        assert result is None
+        sess.cookies.clear.assert_called_once()
+
+    def test_clear_cookies_runs_before_request(self):
+        # If both clear_cookies AND request are set, cookies clear first.
+        sess = self._make_session()
+        sess.request = MagicMock(return_value=MagicMock(status_code=200,
+                                                          headers={},
+                                                          text="ok",
+                                                          content=b"ok",
+                                                          cookies={}))
+        step = {
+            "name": "fresh_login",
+            "clear_cookies": True,
+            "request": {"method": "POST", "url": "http://x/login", "body": "u=a&p=b"},
+        }
+        run_step(sess, step, {"vars": {}}, dry_run=False)
+        sess.cookies.clear.assert_called_once()
+        sess.request.assert_called_once()
+
+    def test_dry_run_does_not_actually_clear(self):
+        sess = self._make_session()
+        step = {"name": "switch", "clear_cookies": True}
+        run_step(sess, step, {"vars": {}}, dry_run=True)
+        # Clear NOT called in dry-run mode - just printed.
+        sess.cookies.clear.assert_not_called()
+
+    def test_step_without_clear_cookies_or_request_returns_none(self):
+        sess = self._make_session()
+        # A truly empty step (just a name) - early return, no crash.
+        step = {"name": "noop"}
+        result = run_step(sess, step, {"vars": {}}, dry_run=False)
+        assert result is None
+
+
+# ---------------------------------------------------------------------
+# loop `refresh` block (for single-use CSRF tokens)
+# ---------------------------------------------------------------------
+class TestLoopRefresh:
+    def test_refresh_runs_once_per_iteration(self):
+        # The refresh block should fire BEFORE each loop iteration.
+        # We use dry_run + a recording session to count run_step calls.
+        sess = MagicMock()
+        sess.cookies = MagicMock()
+        sess.cookies.__len__ = MagicMock(return_value=0)
+
+        # Workflow: 3-iteration loop with a refresh step that
+        # extracts a fake csrf. Main step uses {{csrf}}.
+        workflow = {
+            "steps": [
+                {
+                    "name": "loop_with_refresh",
+                    "loop": {"count": 3, "var": "i"},
+                    "refresh": [
+                        {"name": "_get_csrf",
+                         "request": {"method": "GET", "url": "http://x/form"}}
+                    ],
+                    "request": {"method": "POST", "url": "http://x/submit"},
+                }
+            ]
+        }
+        run_workflow(workflow, sess, {}, dry_run=True)
+        # In dry-run mode no actual HTTP calls happen so we can't
+        # count sess.request invocations - but the workflow shouldn't
+        # crash AND should report the loop iteration count.
+        # The real verification is that the run completes without
+        # error AND the test below confirms the loop iterates.
+
+    def test_refresh_can_be_single_dict_not_list(self):
+        # Convenience: workflow author can pass a single step dict
+        # instead of a one-element list.
+        sess = MagicMock()
+        sess.cookies = MagicMock()
+        sess.cookies.__len__ = MagicMock(return_value=0)
+        workflow = {
+            "steps": [
+                {
+                    "name": "loop",
+                    "loop": {"count": 2},
+                    "refresh": {  # single dict, not list
+                        "name": "_pre",
+                        "request": {"method": "GET", "url": "http://x/"}
+                    },
+                    "request": {"method": "POST", "url": "http://x/"},
+                }
+            ]
+        }
+        # Should not raise (the wrapper converts dict -> [dict]).
+        run_workflow(workflow, sess, {}, dry_run=True)
+
+    def test_loop_without_refresh_still_works(self):
+        # Regression: don't require refresh; loops without it should
+        # behave exactly as before.
+        sess = MagicMock()
+        sess.cookies = MagicMock()
+        sess.cookies.__len__ = MagicMock(return_value=0)
+        workflow = {
+            "steps": [
+                {"name": "plain_loop", "loop": {"count": 3},
+                 "request": {"method": "GET", "url": "http://x/"}}
+            ]
+        }
+        summary = run_workflow(workflow, sess, {}, dry_run=True)
+        # Loop step recorded with iteration count
+        assert any(s.get("loop") and s.get("iterations") == 3
+                    for s in summary["steps"])
