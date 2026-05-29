@@ -289,6 +289,7 @@ def build_session(
     proxy: str | None = None,
     insecure: bool = False,
     retries: int = 2,
+    cookies: dict[str, str] | None = None,
 ) -> requests.Session:
     """
     Construct a requests.Session with:
@@ -334,6 +335,13 @@ def build_session(
         s.proxies = {"http": proxy, "https": proxy}
     if insecure:
         s.verify = False
+
+    # Seed cookies BEFORE returning so every subsequent request from
+    # this session includes them. requests' CookieJar.update accepts
+    # a plain dict directly.
+    if cookies:
+        s.cookies.update(cookies)
+
     return s
 
 
@@ -403,6 +411,91 @@ def apply_encoding(payload: str, chain: list[str]) -> str:
     for name in chain:
         payload = ENCODERS[name](payload)
     return payload
+
+
+# ---------------------------------------------------------------------
+# AUTHENTICATED PROBING + COOKIE JAR
+# ---------------------------------------------------------------------
+# Real-world pentesting almost always involves authenticated areas:
+# admin panels, account pages, internal APIs. The two pieces we need:
+#
+#   1. LOGIN FLOW: POST credentials to a login endpoint, let the
+#      server set a session cookie via Set-Cookie. requests.Session
+#      captures those automatically into its .cookies jar.
+#   2. COOKIE PERSISTENCE: save the jar to disk after login and
+#      reload it on subsequent runs, so you don't re-authenticate
+#      every invocation (which both wastes time and trips lockout
+#      counters on the login endpoint).
+#
+# We support three ways to provide cookies, any combination:
+#   --login-url + --login-data : do a login POST at startup
+#   --cookie-jar FILE          : load saved cookies (and save updated ones)
+#   --cookie 'name=value'      : manually set one (repeatable)
+
+
+def parse_form_data(s: str) -> dict[str, str]:
+    """
+    Parse 'user=admin&pw=secret&token=abc' into a dict.
+
+    Uses urllib.parse so '+' and '%XX' percent-encoding work correctly -
+    important when credentials contain spaces or special chars.
+    """
+    return dict(urllib.parse.parse_qsl(s, keep_blank_values=True))
+
+
+def parse_cookie_pair(s: str) -> tuple[str, str]:
+    """Parse one 'name=value' into (name, value). Fails on missing '='."""
+    if "=" not in s:
+        sys.exit(f"[!] --cookie must look like 'name=value', got {s!r}")
+    name, _, value = s.partition("=")
+    return name.strip(), value.strip()
+
+
+def load_cookie_jar(path: Path) -> dict[str, str]:
+    """
+    Load a JSON cookie jar from disk. Missing file -> empty dict (so
+    a fresh run with --cookie-jar still works).
+
+    Format is intentionally a simple flat {name: value} dict instead
+    of the richer Netscape format that supports per-cookie domain /
+    path / expiry. For lab work everything's same-host and we just
+    need the values; if we ever need a real jar we'd switch to
+    http.cookiejar.MozillaCookieJar.
+    """
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        sys.exit(f"[!] cookie jar {path} is not valid JSON: {e}")
+    if not isinstance(data, dict):
+        sys.exit(f"[!] cookie jar {path} must contain a JSON object")
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def save_cookie_jar(path: Path, cookies: dict[str, str]) -> None:
+    """Persist current cookies to disk for next run."""
+    path.write_text(json.dumps(cookies, indent=2, sort_keys=True) + "\n")
+
+
+def login_and_capture(session: requests.Session, login_url: str,
+                      login_data: dict[str, str]) -> dict[str, str]:
+    """
+    POST credentials to the login endpoint. requests.Session captures
+    any Set-Cookie response headers into session.cookies automatically -
+    we just need to do the POST and read them back.
+
+    allow_redirects=True so we follow any post-login redirect (most
+    apps redirect to /my-account or /dashboard); the cookies set
+    during the redirect chain end up in the jar too.
+    """
+    r = session.post(login_url, data=login_data, allow_redirects=True, timeout=20)
+    # `r.status_code` of 200 after a redirect chain is the normal
+    # success path. 401/403 means login failed. We don't fail here
+    # because some apps still 200 a failed login - we just return
+    # whatever cookies got set (may be empty) and let the user see
+    # the request didn't work via Burp / --verbose.
+    return dict(session.cookies)
 
 
 # ---------------------------------------------------------------------
@@ -903,6 +996,9 @@ class FuzzConfig:
     output_csv: Path | None = None
     output_html: Path | None = None
     output_md: Path | None = None
+    # Pre-captured cookies (from login flow / loaded jar / --cookie flags),
+    # applied to every Session we build.
+    cookies: dict[str, str] = field(default_factory=dict)
 
 
 # =====================================================================
@@ -967,7 +1063,8 @@ def fuzz(cfg: FuzzConfig) -> None:
 
     # ---- Build shared session unless --fresh-session ----
     shared = None if cfg.fresh_session else build_session(
-        cfg.workers, cfg.proxy, cfg.insecure, cfg.retries)
+        cfg.workers, cfg.proxy, cfg.insecure, cfg.retries,
+        cookies=cfg.cookies)
 
     results = []
     first_hit_dumped = False
@@ -975,7 +1072,8 @@ def fuzz(cfg: FuzzConfig) -> None:
     def worker(item):
         label, req = item
         maybe_jitter(cfg.jitter)
-        sess = (build_session(1, cfg.proxy, cfg.insecure, cfg.retries)
+        sess = (build_session(1, cfg.proxy, cfg.insecure, cfg.retries,
+                              cookies=cfg.cookies)
                 if cfg.fresh_session else shared)
         try:
             r, elapsed = send(sess, req, host, scheme)
@@ -1119,6 +1217,29 @@ def main():
              "Examples: --encode url, --encode url,base64 (URL then base64), "
              "--encode double-url",
     )
+    # ---- Authenticated probing ----
+    ap.add_argument(
+        "--login-url", metavar="URL",
+        help="Do a login POST to this URL at startup; cookies set by the "
+             "response are reused for every fuzz request.",
+    )
+    ap.add_argument(
+        "--login-data", metavar="FORM",
+        help="Form data for the login POST, like a query string: "
+             "'username=admin&password=secret'. URL-decoded by parse_qsl.",
+    )
+    ap.add_argument(
+        "--cookie", action="append", default=[], metavar="NAME=VALUE",
+        help="Set a cookie manually on every request (repeatable). Use when "
+             "you already have a session cookie from your browser and don't "
+             "want to re-login.",
+    )
+    ap.add_argument(
+        "--cookie-jar", type=Path, metavar="FILE",
+        help="JSON cookie jar. Loaded at startup if it exists; updated after "
+             "the login flow (if --login-url is set) so subsequent runs "
+             "skip the login.",
+    )
     args = ap.parse_args()
 
     # ---- Build the matcher from the four match-* args ----
@@ -1154,6 +1275,39 @@ def main():
     if insecure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+    # ---- Assemble the starting cookie set ----
+    # Priority (later overrides earlier):
+    #   1. --cookie-jar file (saved from previous run)
+    #   2. --login-url POST result (fresh session this run)
+    #   3. --cookie NAME=VALUE flags (explicit overrides)
+    cookies: dict[str, str] = {}
+    if args.cookie_jar:
+        cookies.update(load_cookie_jar(args.cookie_jar))
+        if cookies:
+            print(f"{tag_info()} loaded {len(cookies)} cookie(s) from {args.cookie_jar}")
+
+    if args.login_url:
+        if not args.login_data:
+            sys.exit("[!] --login-url requires --login-data")
+        # Build a one-off session for the login POST. We pass current
+        # cookies in case a previous step (jar) already set something
+        # (e.g. a CSRF cookie that the login form needs).
+        login_session = build_session(1, proxy, insecure, args.retries,
+                                       cookies=cookies)
+        login_data = parse_form_data(args.login_data)
+        print(f"{tag_info()} logging in: POST {args.login_url}")
+        new_cookies = login_and_capture(login_session, args.login_url, login_data)
+        cookies.update(new_cookies)
+        print(f"{tag_info()} captured {len(new_cookies)} cookie(s) from login response")
+
+    for raw in args.cookie:
+        name, val = parse_cookie_pair(raw)
+        cookies[name] = val
+
+    # Persist for next run, if the user asked us to.
+    if args.cookie_jar and cookies:
+        save_cookie_jar(args.cookie_jar, cookies)
+
     cfg = FuzzConfig(
         request_text=args.request_file.read_text(),
         payload_files=args.payload,
@@ -1172,6 +1326,7 @@ def main():
         output_csv=args.output_csv,
         output_html=args.output_html,
         output_md=args.output_md,
+        cookies=cookies,
     )
 
     fuzz(cfg)

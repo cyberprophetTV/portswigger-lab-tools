@@ -16,6 +16,7 @@ from intruder import (
     parse_jitter, sniper, battering_ram, pitchfork, cluster_bomb,
     apply_encoding, parse_encode_chain, ENCODERS,
     write_json, write_csv, write_html, write_markdown,
+    parse_form_data, parse_cookie_pair, load_cookie_jar, save_cookie_jar,
 )
 
 
@@ -454,3 +455,61 @@ class TestWriteHtml:
         assert "<script>alert(1)</script>" not in text
         # The escaped form must appear instead.
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+
+
+# ---------------------------------------------------------------------
+# Auth helpers (--login-url / --login-data / --cookie / --cookie-jar)
+# ---------------------------------------------------------------------
+class TestParseFormData:
+    def test_basic(self):
+        assert parse_form_data("user=admin&pw=secret") == {
+            "user": "admin", "pw": "secret"
+        }
+
+    def test_url_encoded_values(self):
+        # Spaces, &, +, all common in real credentials.
+        # parse_qsl turns + into space and decodes %XX.
+        assert parse_form_data("user=al%40bob&pw=p%26q") == {
+            "user": "al@bob", "pw": "p&q"
+        }
+
+    def test_blank_value(self):
+        # keep_blank_values=True so empty fields aren't silently dropped.
+        assert parse_form_data("token=") == {"token": ""}
+
+
+class TestParseCookiePair:
+    def test_basic(self):
+        assert parse_cookie_pair("session=abc123") == ("session", "abc123")
+
+    def test_value_can_contain_equals(self):
+        # Tokens often contain '=' (e.g. base64 padding). partition
+        # only splits on the first '='.
+        assert parse_cookie_pair("token=YWRtaW4=") == ("token", "YWRtaW4=")
+
+    def test_missing_equals_exits(self):
+        with pytest.raises(SystemExit):
+            parse_cookie_pair("just_a_name")
+
+
+class TestCookieJar:
+    def test_load_returns_empty_when_file_missing(self, tmp_path):
+        assert load_cookie_jar(tmp_path / "nope.json") == {}
+
+    def test_save_and_load_roundtrips(self, tmp_path):
+        jar = tmp_path / "jar.json"
+        original = {"session": "abc", "csrf": "xyz"}
+        save_cookie_jar(jar, original)
+        assert load_cookie_jar(jar) == original
+
+    def test_load_rejects_non_object_json(self, tmp_path):
+        jar = tmp_path / "bad.json"
+        jar.write_text("[1, 2, 3]")     # list, not dict
+        with pytest.raises(SystemExit):
+            load_cookie_jar(jar)
+
+    def test_load_rejects_malformed_json(self, tmp_path):
+        jar = tmp_path / "bad.json"
+        jar.write_text("{not json")
+        with pytest.raises(SystemExit):
+            load_cookie_jar(jar)
