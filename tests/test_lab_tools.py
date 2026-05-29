@@ -19,6 +19,7 @@ from lab_tools import (
     TOOLS, THEMES, Tool, Prompt, build_command, check_paths, RuleTracker,
     parse_motivation, render_motivation_quote, render_motivation_full,
     render_vuln_matrix, TOOL_CATEGORIES,
+    SessionState, apply_session_defaults, save_to_session,
 )
 
 
@@ -266,6 +267,75 @@ class TestRuleTracker:
         t.render(console)
         # Nothing recorded -> nothing rendered.
         assert console.file.getvalue() == ""
+
+
+class TestSessionState:
+    def test_empty_session_has_nothing(self):
+        s = SessionState()
+        assert not s.has_any()
+        assert s.snapshot() == {}
+
+    def test_snapshot_omits_blank_fields(self):
+        s = SessionState(lab_url="https://x.com")
+        assert s.snapshot() == {"lab_url": "https://x.com"}
+        # proxy / oast_host / etc. are blank by default -> not in snapshot
+
+    def test_constructor_takes_initial_values(self):
+        s = SessionState(lab_url="x", proxy="burp", oast_host="abc")
+        snap = s.snapshot()
+        assert snap == {"lab_url": "x", "proxy": "burp", "oast_host": "abc"}
+
+
+class TestApplySessionDefaults:
+    def test_no_shared_var_returns_prompt_unchanged(self):
+        prompts = [Prompt("x", "?", default="orig")]
+        out = apply_session_defaults(prompts, SessionState(lab_url="https://x"))
+        assert out[0].default == "orig"
+
+    def test_shared_var_set_overrides_default(self):
+        prompts = [Prompt("base_url", "?", default="orig",
+                           shared_var="lab_url")]
+        out = apply_session_defaults(prompts,
+                                       SessionState(lab_url="https://override.com"))
+        assert out[0].default == "https://override.com"
+        # Original prompt list NOT mutated.
+        assert prompts[0].default == "orig"
+
+    def test_shared_var_unset_keeps_original_default(self):
+        prompts = [Prompt("base_url", "?", default="orig",
+                           shared_var="lab_url")]
+        out = apply_session_defaults(prompts, SessionState())
+        assert out[0].default == "orig"
+
+
+class TestSaveToSession:
+    def test_saves_shared_var_answers(self):
+        s = SessionState()
+        prompts = [
+            Prompt("base_url", "?", shared_var="lab_url"),
+            Prompt("--workers", "?"),         # no shared_var
+        ]
+        save_to_session(
+            answers={"base_url": "https://x.com", "--workers": "10"},
+            prompts=prompts, session=s,
+        )
+        assert s.lab_url == "https://x.com"
+        # non-shared-var answer left out of session
+        assert "10" not in s.snapshot().values()
+
+    def test_blank_answer_does_not_overwrite(self):
+        s = SessionState(lab_url="https://existing.com")
+        prompts = [Prompt("base_url", "?", shared_var="lab_url")]
+        save_to_session(answers={"base_url": ""}, prompts=prompts, session=s)
+        # Existing value preserved when user supplies blank.
+        assert s.lab_url == "https://existing.com"
+
+    def test_missing_answer_does_not_crash(self):
+        # If the prompt was skipped, save_to_session shouldn't blow up.
+        s = SessionState()
+        prompts = [Prompt("base_url", "?", shared_var="lab_url")]
+        save_to_session(answers={}, prompts=prompts, session=s)
+        assert s.lab_url == ""
 
 
 class TestToolCategories:

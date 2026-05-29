@@ -106,7 +106,7 @@ import shlex                                 # for quoting CLI args correctly
 import subprocess
 import sys
 import time                                  # monotonic elapsed-time tracker
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 # ---- Optional deps with friendly install message ----
@@ -247,6 +247,51 @@ class Prompt:
     kind: str = "text"      # "text" | "select" | "path"
     choices: list[str] = field(default_factory=list)  # for kind="select"
     required: bool = True
+    # If set, the value is pulled from / saved into SessionState by
+    # this key. Use for inputs that the user provides ONCE and reuses
+    # across many tool invocations (lab URL, cookie jars, proxy, OAST
+    # host). Speed matters in a 4-hour exam - retyping the lab URL
+    # into every tool is wasted minutes.
+    shared_var: str | None = None
+
+
+# =====================================================================
+# SESSION STATE - things the user enters ONCE and reuses across tools
+# =====================================================================
+# The launcher remembers per-session values so prompts can default to
+# the most recently used input. Specifically:
+#
+#   lab_url      The lab's https://...web-security-academy.net URL.
+#                Almost every tool wants this; entering it once and
+#                having every subsequent prompt default to it saves
+#                10+ typing seconds per tool invocation.
+#   cookie_jar   Path to a saved cookie jar (admin or default session).
+#                Used by intruder, dirbuster, param_miner, security_audit.
+#   admin_jar    Specifically for privesc's --admin-jar slot.
+#   user_jar     Specifically for privesc's --user-jar slot.
+#   proxy        Proxy URL (e.g. "burp" or "http://127.0.0.1:8080").
+#   oast_host    Out-of-band host for blind-vuln probes.
+#   request_file Default raw HTTP request template path.
+#
+# Lazy semantics: nothing is set until you enter it. After you enter
+# it, future prompts with the matching `shared_var` use it as default.
+# You can wipe it with `--reset-defaults` at launch.
+@dataclass
+class SessionState:
+    lab_url:      str = ""
+    cookie_jar:   str = ""
+    admin_jar:    str = ""
+    user_jar:     str = ""
+    proxy:        str = ""
+    oast_host:    str = ""
+    request_file: str = ""
+
+    def snapshot(self) -> dict[str, str]:
+        """Return the currently-set values for display purposes."""
+        return {k: v for k, v in self.__dict__.items() if v}
+
+    def has_any(self) -> bool:
+        return bool(self.snapshot())
 
 
 @dataclass
@@ -294,7 +339,8 @@ TOOLS: list[Tool] = [
         ),
         lab_url="https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-different-responses",
         prompts=[
-            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)"),
+            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)",
+                   shared_var="lab_url"),
             Prompt("usernames", "Usernames wordlist path  (one username per line, e.g. usernames.txt)",
                    default="usernames.txt", kind="path"),
             Prompt("passwords", "Passwords wordlist path  (one password per line, e.g. passwords.txt)",
@@ -318,7 +364,8 @@ TOOLS: list[Tool] = [
         ),
         lab_url="https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-subtly-different-responses",
         prompts=[
-            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)"),
+            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)",
+                   shared_var="lab_url"),
             Prompt("usernames", "Usernames wordlist path  (one username per line, e.g. usernames.txt)",
                    default="usernames.txt", kind="path"),
             Prompt("passwords", "Passwords wordlist path  (one password per line, e.g. passwords.txt)",
@@ -343,7 +390,8 @@ TOOLS: list[Tool] = [
         ),
         lab_url="https://portswigger.net/web-security/authentication/password-based/lab-username-enumeration-via-response-timing",
         prompts=[
-            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)"),
+            Prompt("base_url",  "Lab URL  (example: https://0a1b00ab.web-security-academy.net)",
+                   shared_var="lab_url"),
             Prompt("usernames", "Usernames wordlist path  (one username per line, e.g. usernames.txt)",
                    default="usernames.txt", kind="path"),
             Prompt("passwords", "Passwords wordlist path  (one password per line, e.g. passwords.txt)",
@@ -483,10 +531,10 @@ TOOLS: list[Tool] = [
                    kind="path"),
             Prompt("--admin-jar", "Admin cookie jar  (JSON file, blank to skip; "
                                   "e.g. admin.json from `intruder --cookie-jar`)",
-                   default="", kind="path", required=False),
+                   default="", kind="path", required=False, shared_var="admin_jar"),
             Prompt("--user-jar",  "Low-priv cookie jar  (JSON file, blank to skip; "
                                   "e.g. user.json)",
-                   default="", kind="path", required=False),
+                   default="", kind="path", required=False, shared_var="user_jar"),
         ],
         vulnerabilities=[
             "IDOR / Broken Object-Level Authorization (BOLA)",
@@ -508,7 +556,8 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("url", "Target URL  (example: https://target.com/dashboard)"),
+            Prompt("url", "Target URL  (example: https://target.com/dashboard)",
+                   shared_var="lab_url"),
         ],
         vulnerabilities=[
             "Missing security headers (CSP, HSTS, X-Frame-Options, etc.)",
@@ -534,7 +583,7 @@ TOOLS: list[Tool] = [
         prompts=[
             Prompt("request_file", "Raw HTTP request template  "
                                    "(must have a POST body; see examples/login.txt)",
-                   default="examples/login.txt", kind="path"),
+                   default="examples/login.txt", kind="path", shared_var="request_file"),
             Prompt("--params", "Parameter wordlist  (one param name per line; "
                                "e.g. hidden-params.txt has admin, debug, role, ...)",
                    default="hidden-params.txt", kind="path"),
@@ -566,7 +615,8 @@ TOOLS: list[Tool] = [
         ),
         lab_url=None,
         prompts=[
-            Prompt("base_url", "Target base URL  (example: https://target.com)"),
+            Prompt("base_url", "Target base URL  (example: https://target.com)",
+                   shared_var="lab_url"),
             Prompt("wordlist", "Path wordlist  (one path per line, no leading slash; "
                                "e.g. common-paths.txt, SecLists raft-small-words.txt)",
                    default="common-paths.txt", kind="path"),
@@ -600,7 +650,7 @@ TOOLS: list[Tool] = [
             Prompt("request_file", "Raw HTTP request template file  "
                                    "(paste from Burp's Raw tab; mark payload positions "
                                    "with §...§; see examples/login.txt)",
-                   default="examples/login.txt", kind="path"),
+                   default="examples/login.txt", kind="path", shared_var="request_file"),
             Prompt("--payload", "Payload wordlist path  "
                                 "(one payload per line; e.g. usernames.txt, "
                                 "your-sqli-list.txt, your-xss-list.txt)",
@@ -735,6 +785,8 @@ def make_console(theme_name: str) -> Console:
 
 _MOTIVATION_ACTION = "Show motivation (Brain Unloader)"
 _VULN_MATRIX_ACTION = "Show tool → vulnerability matrix"
+_QUICK_SETUP_ACTION = "Quick setup (set lab URL + cookies + proxy + OAST host)"
+_RESET_DEFAULTS_ACTION = "Reset session defaults"
 
 
 def show_tool_menu(console: Console) -> Tool | None | str:
@@ -773,7 +825,8 @@ def show_tool_menu(console: Console) -> Tool | None | str:
     # the plain-text questionary list.
     choices = [f"[{TOOL_CATEGORIES[t.category]['abbrev']}] {t.name}"
                 for t in TOOLS]
-    choices += [_VULN_MATRIX_ACTION, _MOTIVATION_ACTION, "Quit"]
+    choices += [_QUICK_SETUP_ACTION, _RESET_DEFAULTS_ACTION,
+                 _VULN_MATRIX_ACTION, _MOTIVATION_ACTION, "Quit"]
     pick = questionary.select(
         "Pick a tool:",
         choices=choices,
@@ -781,10 +834,9 @@ def show_tool_menu(console: Console) -> Tool | None | str:
     ).ask()
     if pick is None or pick == "Quit":
         return None
-    if pick == _MOTIVATION_ACTION:
-        return _MOTIVATION_ACTION
-    if pick == _VULN_MATRIX_ACTION:
-        return _VULN_MATRIX_ACTION
+    if pick in (_MOTIVATION_ACTION, _VULN_MATRIX_ACTION,
+                 _QUICK_SETUP_ACTION, _RESET_DEFAULTS_ACTION):
+        return pick
     # Strip the "[ACT] " / "[SOL] " / etc. prefix to match back to the
     # underlying Tool.
     tool_name = pick
@@ -838,15 +890,98 @@ def render_vuln_matrix(console: Console) -> None:
     )
 
 
-def collect_args(tool: Tool, q_style: QStyle) -> dict[str, str] | None:
+def apply_session_defaults(prompts: list[Prompt], session: SessionState) -> list[Prompt]:
+    """
+    Return a copy of `prompts` where each Prompt whose `shared_var` is
+    set in the session uses the session value as its default. Pure -
+    doesn't mutate input.
+    """
+    out = []
+    for p in prompts:
+        if p.shared_var:
+            session_val = getattr(session, p.shared_var, "")
+            if session_val:
+                out.append(replace(p, default=session_val))
+                continue
+        out.append(p)
+    return out
+
+
+def save_to_session(answers: dict, prompts: list[Prompt],
+                     session: SessionState) -> None:
+    """After the user supplies answers, save any shared_var-tagged
+    values back into the SessionState for next time."""
+    for p in prompts:
+        if not p.shared_var:
+            continue
+        val = answers.get(p.arg)
+        if val:
+            setattr(session, p.shared_var, val)
+
+
+def render_session_summary(console: Console, session: SessionState) -> None:
+    """Show currently-set session defaults so the user sees what'll auto-fill."""
+    snapshot = session.snapshot()
+    if not snapshot:
+        return
+    console.print()
+    table = Table(title="Session defaults  (auto-filled into matching prompts)",
+                   title_style="primary", border_style="muted",
+                   show_lines=False, padding=(0, 1))
+    table.add_column("Variable", style="accent")
+    table.add_column("Value",    style="success")
+    for k, v in snapshot.items():
+        # Truncate long values so the table stays readable.
+        display = v if len(v) <= 70 else v[:67] + "..."
+        table.add_row(k, display)
+    console.print(table)
+
+
+def run_quick_setup(session: SessionState, q_style) -> None:
+    """
+    Let the user pre-fill all the high-traffic shared vars in ONE
+    interactive flow. Each prompt offers the current value as default
+    (blank if not yet set). Blank input = leave unchanged.
+    """
+    defs = [
+        ("lab_url",     "Lab URL  (example: https://0a1b00ab.web-security-academy.net)"),
+        ("cookie_jar",  "Default cookie jar (JSON file, blank to skip)"),
+        ("admin_jar",   "Admin cookie jar (for privesc, blank to skip)"),
+        ("user_jar",    "Low-priv cookie jar (for privesc, blank to skip)"),
+        ("proxy",       "Proxy URL  ('burp' = http://127.0.0.1:8080, blank to skip)"),
+        ("oast_host",   "OAST host  (interactsh / canarytoken / webhook.site, blank to skip)"),
+        ("request_file","Default raw HTTP request template (blank to skip)"),
+    ]
+    for field_name, question in defs:
+        current = getattr(session, field_name, "")
+        new = questionary.text(question, default=current,
+                                qmark="", style=q_style).ask()
+        if new is None:
+            return  # Ctrl-C - leave whatever was there
+        # Treat blank as "keep current"; user explicitly clears via
+        # --reset-defaults at launch.
+        if new.strip():
+            setattr(session, field_name, new.strip())
+
+
+def collect_args(tool: Tool, q_style: QStyle,
+                  session: SessionState | None = None) -> dict[str, str] | None:
     """
     Walk through the tool's prompts and collect the user's answers.
 
     Returns a dict {arg_name: value} ready to convert into a CLI
     command. Returns None if the user cancelled (Ctrl-C).
+
+    If `session` is provided, prompts whose `shared_var` is already
+    set in the session use the session value as the default - so
+    e.g. entering the lab URL once auto-fills every subsequent tool's
+    URL prompt. This is the BSCP-exam speedup: you'd retype the same
+    URL into 5+ tools otherwise.
     """
+    prompts = (apply_session_defaults(tool.prompts, session)
+                if session else tool.prompts)
     answers: dict[str, str] = {}
-    for p in tool.prompts:
+    for p in prompts:
         if p.kind == "select":
             val = questionary.select(
                 p.question,
@@ -1141,12 +1276,14 @@ class RuleTracker:
 
 def confirm_and_run(console: Console, cmd: list[str], q_style: QStyle) -> tuple[int, float]:
     """
-    Show the assembled command, ask the user to confirm, exec it,
-    and return (returncode, elapsed_seconds).
+    Show the assembled command, exec it immediately, return
+    (returncode, elapsed_seconds). No yes/no - you picked the tool and
+    filled out the args, so obviously you want to run it.
 
-    Showing the command is intentional: it teaches the user exactly
-    what shell command they would have typed to run this tool directly.
-    Next time they don't need the launcher unless they want to.
+    Showing the command is STILL intentional: it teaches the user
+    exactly what shell command they would have typed to run this tool
+    directly. Next time they don't need the launcher unless they want
+    to. (Ctrl-C is the bail-out.)
 
     Elapsed time goes into the per-session RuleTracker so the launcher
     can warn when a tool eats too much time.
@@ -1157,37 +1294,53 @@ def confirm_and_run(console: Console, cmd: list[str], q_style: QStyle) -> tuple[
     console.print()
     console.print(Panel(
         Text(rendered, style="success"),
-        title="Will run",
-        subtitle="(paste into your shell to skip the launcher next time)",
+        title="Running now  (Ctrl-C to cancel)",
+        subtitle="paste this into your shell to skip the launcher next time",
         border_style="accent",
         padding=(0, 2),
     ))
-
-    go = questionary.confirm("Run it now?", default=True, qmark="", style=q_style).ask()
-    if not go:
-        return -1, 0.0
-
     console.print()
+
     # subprocess.run with no `capture_output` lets the tool's stdout/stderr
     # stream live to the user's terminal - including our color tags.
     start = time.monotonic()
-    result = subprocess.run(cmd)
+    try:
+        result = subprocess.run(cmd)
+        rc = result.returncode
+    except KeyboardInterrupt:
+        # User wants out - count as "skipped" rather than success/error.
+        console.print("[muted]cancelled with Ctrl-C[/muted]")
+        rc = -1
     elapsed = time.monotonic() - start
-    return result.returncode, elapsed
+    return rc, elapsed
 
 
 # ---------------------------------------------------------------------
 # MAIN LOOP
 # ---------------------------------------------------------------------
 def main():
-    # ---- CLI: --time-limit lets the user tune the "you're stuck" threshold ----
+    # ---- CLI: speed-up flags for setting session defaults at launch ----
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     ap.add_argument("--time-limit", type=float, default=15.0, metavar="MINUTES",
                     help="Warn when accumulated time on a single tool exceeds N "
                          "minutes (default 15). Enforces the BSCP-exam "
                          "'don't get stuck' rule.")
+    ap.add_argument("--lab-url", default="", metavar="URL",
+                    help="Pre-populate the session-wide lab URL. Every tool "
+                         "prompt that asks for a lab/base/target URL will "
+                         "default to this. Skips a LOT of typing in a 4-hour "
+                         "exam.")
+    ap.add_argument("--proxy", default="", metavar="URL",
+                    help="Pre-populate the session-wide proxy (e.g. 'burp').")
+    ap.add_argument("--oast-host", default="", metavar="HOST",
+                    help="Pre-populate the session-wide OAST host.")
     args = ap.parse_args()
     tracker = RuleTracker(time_limit_minutes=args.time_limit)
+    session = SessionState(
+        lab_url=args.lab_url,
+        proxy=args.proxy,
+        oast_host=args.oast_host,
+    )
 
     # Load motivation quotes ONCE at startup so we can sprinkle them
     # at strategic moments without re-reading the file every time.
@@ -1221,10 +1374,11 @@ def main():
     q_style = make_questionary_style(theme_name)
 
     while True:
-        # Show the running session-time tracker between selections so
-        # the user always sees where their time is going. Skipped on
-        # the very first iteration (nothing to show yet).
+        # Show the running session-time tracker AND the auto-filled
+        # session defaults between selections so the user always sees
+        # WHERE their time is going AND WHAT will be pre-filled.
         tracker.render(console)
+        render_session_summary(console, session)
 
         tool = show_tool_menu(console)
         if tool is None:
@@ -1235,6 +1389,13 @@ def main():
             continue
         if tool == _VULN_MATRIX_ACTION:
             render_vuln_matrix(console)
+            continue
+        if tool == _QUICK_SETUP_ACTION:
+            run_quick_setup(session, q_style)
+            continue
+        if tool == _RESET_DEFAULTS_ACTION:
+            session = SessionState()
+            console.print("[muted]session defaults cleared[/muted]")
             continue
 
         show_tool_intro(console, tool)
@@ -1267,10 +1428,13 @@ def main():
             console.print(f"[error]script not found: {script_path}[/error]")
             continue
 
-        answers = collect_args(tool, q_style)
+        answers = collect_args(tool, q_style, session=session)
         if answers is None:
             console.print("[muted]cancelled[/muted]")
             continue
+        # Save shared-var answers back to the session so the next tool
+        # invocation can default to them.
+        save_to_session(answers, tool.prompts, session)
 
         # Validate that every path-kind prompt actually points at an
         # existing file. Catching this before exec gives a clear error
@@ -1303,16 +1467,10 @@ def main():
                 console.print(f"[error]tool exited with code {rc}[/error]  "
                               f"[muted]({elapsed_min:.1f} min)[/muted]")
 
-        # Ask whether to loop back to the menu or quit.
-        again = questionary.confirm(
-            "Back to menu?",
-            default=True,
-            qmark="›",
-            style=q_style,
-        ).ask()
-        if not again:
-            console.print("[muted]bye[/muted]")
-            break
+        # No "back to menu?" prompt - the menu always has a Quit option,
+        # so asking after every single run is friction with no benefit.
+        # Loop straight back to the tool menu (Quit from the menu OR
+        # Ctrl-C from anywhere to bail).
 
 
 if __name__ == "__main__":
