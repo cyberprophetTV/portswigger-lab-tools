@@ -300,6 +300,45 @@ class TestMagic:
         names = [n for n, _ in candidates]
         assert "JWT decode" in names
 
+    def test_detects_query_string_multi_pair(self):
+        candidates = magic_decode("id=1&user=alice&role=admin")
+        names = [n for n, _ in candidates]
+        assert "Parse query string" in names
+        result = next(r for n, r in candidates if n == "Parse query string")
+        assert "alice" in result
+        assert "admin" in result
+
+    def test_detects_query_string_with_leading_question(self):
+        # Single-pair `?id=1` IS recognized because of the leading `?`
+        candidates = magic_decode("?id=1")
+        names = [n for n, _ in candidates]
+        assert "Parse query string" in names
+
+    def test_rejects_bare_single_kv(self):
+        # `hello=world` could be ANYTHING - too ambiguous to call a
+        # query string without `&` or leading `?`
+        candidates = magic_decode("hello=world")
+        names = [n for n, _ in candidates]
+        assert "Parse query string" not in names
+
+    def test_rejects_text_with_spaces(self):
+        # Real query strings encode spaces as + or %20 - raw spaces
+        # mean this is NOT a query string
+        candidates = magic_decode("hello=world without ampersand")
+        names = [n for n, _ in candidates]
+        assert "Parse query string" not in names
+
+    def test_rejects_full_url(self):
+        # urlparse handles URLs better; don't double-fire
+        candidates = magic_decode("https://t.com/?id=1&user=alice")
+        names = [n for n, _ in candidates]
+        assert "Parse query string" not in names
+
+    def test_accepts_url_encoded_values(self):
+        candidates = magic_decode("foo=hi&bar=qux%20space")
+        names = [n for n, _ in candidates]
+        assert "Parse query string" in names
+
 
 # ---------------------------------------------------------------------
 # TUI RENDER SMOKE TESTS
@@ -579,6 +618,16 @@ class TestIdentifyCookieShape:
     def test_query_string(self):
         labels = _labels("id=1&user=admin&token=xyz")
         assert any("query string" in l for l in labels)
+
+    def test_query_string_shows_parsed_pairs_inline(self):
+        # Previously the hint said "use `pqs` to parse" - now it should
+        # actually show the parsed pairs in the suggestion text so the
+        # user doesn't have to type another command.
+        hints = identify_format("id=42&user=alice&role=admin")
+        qs_hint = next(h for h in hints if "query string" in h.label.lower())
+        assert "(3 pairs)" in qs_hint.label
+        for fragment in ("id=42", "user=alice", "role=admin"):
+            assert fragment in qs_hint.suggestion
 
 
 class TestIdentifyBase64AndHex:

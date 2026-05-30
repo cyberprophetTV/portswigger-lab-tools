@@ -690,9 +690,21 @@ def identify_format(text: str) -> list[FormatHint]:
 
     # ---- URL query string ----
     if "=" in s and "&" in s and not s.startswith("http"):
-        hints.append(FormatHint(
-            "Looks like URL query string",
-            "use `pqs` to parse into key/value pairs"))
+        # Don't make the user type `pqs` - just parse it inline and
+        # show the pairs as part of the hint. Falls back to the
+        # "use pqs" suggestion only if nothing parsed.
+        parsed = urllib.parse.parse_qsl(s.lstrip("?"), keep_blank_values=True)
+        if parsed:
+            preview = "  ".join(f"{k}={v}" for k, v in parsed[:6])
+            if len(parsed) > 6:
+                preview += f"   (+{len(parsed) - 6} more)"
+            hints.append(FormatHint(
+                f"URL query string ({len(parsed)} pairs)",
+                preview))
+        else:
+            hints.append(FormatHint(
+                "Looks like URL query string",
+                "use `pqs` to parse into key/value pairs"))
 
     # ---- MongoDB ObjectId (24 hex chars - not the same as MD5 / SHA-1) ----
     if re.fullmatch(r"[a-fA-F0-9]{24}", s):
@@ -1101,6 +1113,26 @@ def magic_decode(text: str) -> list[tuple[str, str]]:
             jwt_out = op_word_to_jwt_summary(text, {})
             out.append(("JWT decode", jwt_out))
         except (ValueError, binascii.Error, UnicodeDecodeError):
+            pass
+    # Also try query-string parse. Tight shape guard so we don't
+    # claim `hello=world I have spaces` is a query string:
+    #   - must contain `=`
+    #   - must contain `&` OR start with `?` (single-pair `?id=1` is fine,
+    #     bare `id=1` is too ambiguous)
+    #   - must have NO raw whitespace (real query strings encode spaces)
+    #   - must not be a full URL (urlparse handles those better)
+    has_kv     = "=" in text
+    multi_pair = "&" in text or text.startswith("?")
+    is_url     = text.startswith(("http://", "https://"))
+    no_spaces  = not any(c.isspace() for c in text)
+    if has_kv and multi_pair and no_spaces and not is_url:
+        try:
+            parsed_pairs = urllib.parse.parse_qsl(
+                text.lstrip("?"), keep_blank_values=True)
+            if parsed_pairs:
+                out.append(("Parse query string",
+                            op_parse_query_string(text, {})))
+        except (ValueError, UnicodeDecodeError):
             pass
     return out
 
